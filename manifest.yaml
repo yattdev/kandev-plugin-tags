@@ -1,0 +1,37 @@
+# kandev-plugin-tags manifest -- the declarative contract between this plugin
+# and a kandev host. See PLUGIN-API.md / docs/public/plugins-authoring.md in
+# the kandev monorepo for the full schema.
+id: "kandev-plugin-tags"
+api_version: 1
+version: "0.1.0"
+display_name: "Tags"
+description: "Add one or more tags to a kanban card, stored privately per user, and shown as chips on the card."
+author: "yattdev"
+repo_url: "https://github.com/yattdev/kandev-plugin-tags"
+categories: ["tools"]
+
+# runtime.executables maps each supported platform to the binary kandev
+# spawns as a gRPC subprocess. `make package` cross-compiles all five;
+# `make package-host` builds just the current one. This plugin's backend is a
+# no-op (pluginsdk.UnimplementedPlugin) -- all tag behavior lives in the
+# frontend UI bundle against host.storage, so the binary exists only to
+# satisfy runtime.type: binary.
+runtime:
+  type: binary
+  executables:
+    linux-amd64: "server/plugin-linux-amd64"
+    linux-arm64: "server/plugin-linux-arm64"
+    darwin-amd64: "server/plugin-darwin-amd64"
+    darwin-arm64: "server/plugin-darwin-arm64"
+    windows-amd64: "server/plugin-windows-amd64.exe"
+
+# user_state enables the authenticated, per-user Host storage API
+# (host.storage.get/set/delete/list/subscribe, scope "task") that this
+# plugin uses to store each user's own tags on a card, privately.
+capabilities:
+  user_state: true
+
+# ui.bundle points at the hand-written, no-build ES module frontend half:
+# a task-card-tags chip row plus an "Add tag..." kanban Edit-menu action.
+ui:
+  bundle: "/ui/bundle.js"
