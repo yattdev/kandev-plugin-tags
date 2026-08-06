@@ -32,6 +32,35 @@
   var CHIPS_WRITER_ID = "tags-chips";
   var MODAL_WRITER_ID = "tags-modal";
 
+  // Inline styles (not a global stylesheet -- avoids any injection/cleanup
+  // lifecycle) using the host's CSS custom properties so chips match the
+  // surrounding theme instead of rendering as unstyled, unspaced inline text.
+  var CHIP_ROW_STYLE = { display: "flex", flexWrap: "wrap", gap: "4px", alignItems: "center" };
+  var CHIP_STYLE = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "4px",
+    padding: "1px 7px",
+    borderRadius: "999px",
+    background: "var(--muted)",
+    fontSize: "11px",
+    fontWeight: 500,
+    whiteSpace: "nowrap",
+  };
+  var CHIP_REMOVE_BUTTON_STYLE = {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 0,
+    border: "none",
+    background: "transparent",
+    color: "inherit",
+    opacity: 0.6,
+    cursor: "pointer",
+    lineHeight: 1,
+    fontSize: "11px",
+  };
+
   /**
    * Normalizes one raw tag: trims whitespace, rejects empty strings and
    * anything over MAX_TAG_LENGTH characters. Returns null when invalid.
@@ -164,11 +193,16 @@
 
       return jsx(
         "div",
-        { "data-testid": "kandev-tags-chip-row" },
+        { "data-testid": "kandev-tags-chip-row", style: CHIP_ROW_STYLE },
         tags.map(function (tag) {
           return jsx(
             "span",
-            { key: tag, "data-testid": "kandev-tags-chip", className: "kandev-tags-chip" },
+            {
+              key: tag,
+              "data-testid": "kandev-tags-chip",
+              className: "kandev-tags-chip",
+              style: CHIP_STYLE,
+            },
             tag,
             jsx(
               "button",
@@ -176,8 +210,18 @@
                 type: "button",
                 "aria-label": "Remove tag " + tag,
                 "data-testid": "kandev-tags-chip-remove",
-                onClick: function () {
+                style: CHIP_REMOVE_BUTTON_STYLE,
+                // The chip row lives inside the kanban card's own clickable
+                // area (opens the task on click, e.g. KanbanCardMenu's
+                // "More options" trigger in kanban-card-content.tsx follows
+                // the same stopPropagation convention) -- without this, a
+                // click here also navigates into the task.
+                onClick: function (e) {
+                  if (e && e.stopPropagation) e.stopPropagation();
                   handleRemove(tag);
+                },
+                onPointerDown: function (e) {
+                  if (e && e.stopPropagation) e.stopPropagation();
                 },
               },
               "\u00d7",
@@ -237,19 +281,20 @@
         { "data-testid": "kandev-tags-modal" },
         jsx(
           "div",
-          { "data-testid": "kandev-tags-modal-list" },
+          { "data-testid": "kandev-tags-modal-list", style: CHIP_ROW_STYLE },
           !loaded
             ? "Loading\u2026"
             : tags.map(function (tag) {
                 return jsx(
                   "span",
-                  { key: tag, "data-testid": "kandev-tags-modal-chip" },
+                  { key: tag, "data-testid": "kandev-tags-modal-chip", style: CHIP_STYLE },
                   tag,
                   jsx(
                     "button",
                     {
                       type: "button",
                       "aria-label": "Remove tag " + tag,
+                      style: CHIP_REMOVE_BUTTON_STYLE,
                       onClick: function () {
                         handleRemove(tag);
                       },
