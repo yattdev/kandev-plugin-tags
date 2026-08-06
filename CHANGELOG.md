@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2] - 2026-08-06
+
+### Changed
+
+- fix: style tag chips and stop remove-button clicks from opening the task (33ec845)
+
+
 ## [0.1.1] - 2026-08-06
 
 ### Changed
