@@ -297,3 +297,42 @@ test("TagChips remove button stops propagation so it doesn't also open the task"
   removeButton.props.onPointerDown({ stopPropagation: () => (pointerDownStopped = true) });
   assert.ok(pointerDownStopped, "remove button's onPointerDown must also call stopPropagation");
 });
+
+test("TagChips filters out non-string entries from storage instead of crashing", async () => {
+  const plugin = loadBundle();
+  let TagChips;
+  const fakeHost = makeFakeReactHost();
+  // Storage is a generic, schema-less blob store -- simulate a corrupted or
+  // incompatible-version payload landing in it (numbers, null, an object, a
+  // whitespace-only string, alongside two valid tags).
+  fakeHost.storage = {
+    get: () =>
+      Promise.resolve({
+        value: [123, null, { nested: "obj" }, "   ", "valid-tag", "urgent"],
+        updatedAt: "t0",
+      }),
+    subscribe: () => () => {},
+  };
+  plugin.initialize(
+    {
+      registerComponent(slot, Component) {
+        if (slot === "task-card-tags") TagChips = Component;
+      },
+      registerTaskMenuAction() {},
+    },
+    fakeHost,
+  );
+  assert.ok(TagChips, "task-card-tags component registered");
+
+  const getTree = fakeHost.mount(TagChips, { slotProps: { taskId: "task-1" } });
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  const row = getTree();
+  assert.ok(row, "chip row renders without throwing despite malformed stored entries");
+  const chips = row.children[0];
+  assert.equal(chips.length, 2, "only the two valid string tags should render as chips");
+  const renderedLabels = chips.map((chip) => chip.children[0]);
+  assert.deepEqual(renderedLabels, ["valid-tag", "urgent"]);
+});

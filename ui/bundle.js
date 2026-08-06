@@ -144,7 +144,21 @@
           host.storage.get(STORAGE_SCOPE, taskId, STORAGE_KEY).then(
             function (entry) {
               if (cancelled || thisGeneration !== generation) return;
-              setTags(entry && Array.isArray(entry.value) ? entry.value : []);
+              // Defensive: storage is a generic, schema-less blob store, so
+              // a direct API call or an incompatible plugin version could
+              // stash non-string entries. Rendering those as React children
+              // throws ("Objects are not valid as a React child"), so drop
+              // anything that doesn't normalize to a valid string tag.
+              var rawValue = entry && Array.isArray(entry.value) ? entry.value : [];
+              setTags(
+                rawValue
+                  .map(function (t) {
+                    return typeof t === "string" ? t.trim() : null;
+                  })
+                  .filter(function (t) {
+                    return t !== null && t.length > 0;
+                  }),
+              );
               setLoaded(true);
             },
             function () {
