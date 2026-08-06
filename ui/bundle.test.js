@@ -203,3 +203,97 @@ test("bundle registers the task-card-tags slot and the add-tag menu action", () 
   assert.ok(addTagAction, "registers an add-tag menu action");
   assert.equal(addTagAction.group, "edit");
 });
+
+/**
+ * Minimal React-hooks-and-jsx stand-in sufficient to mount a plugin
+ * component: useState/useEffect run against a single persistent state
+ * array (mount runs effects once; state setters re-invoke the component),
+ * and jsx() records the element tree as plain objects so tests can walk it.
+ */
+function makeFakeReactHost() {
+  let hookIndex;
+  const hookStates = [];
+  let renderComponent = null;
+  let tree;
+
+  function rerender() {
+    hookIndex = 0;
+    tree = renderComponent();
+  }
+
+  const React = {
+    useState(initial) {
+      const i = hookIndex++;
+      if (!(i in hookStates)) hookStates[i] = initial;
+      const setState = (updater) => {
+        hookStates[i] = typeof updater === "function" ? updater(hookStates[i]) : updater;
+        rerender();
+      };
+      return [hookStates[i], setState];
+    },
+    useEffect(fn, deps) {
+      const i = hookIndex++;
+      if (!(i in hookStates)) {
+        hookStates[i] = deps;
+        fn();
+      }
+    },
+  };
+  const jsx = (type, props, ...children) => ({ type, props, children });
+
+  return {
+    React,
+    jsx,
+    mount(Component, props) {
+      renderComponent = () => Component(props);
+      rerender();
+      return () => tree;
+    },
+  };
+}
+
+test("TagChips remove button stops propagation so it doesn't also open the task", async () => {
+  const plugin = loadBundle();
+  let TagChips;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.storage = {
+    get: () => Promise.resolve({ value: ["urgent"], updatedAt: "t0" }),
+    subscribe: () => () => {},
+  };
+  plugin.initialize(
+    {
+      registerComponent(slot, Component) {
+        if (slot === "task-card-tags") TagChips = Component;
+      },
+      registerTaskMenuAction() {},
+    },
+    fakeHost,
+  );
+  assert.ok(TagChips, "task-card-tags component registered");
+
+  const getTree = fakeHost.mount(TagChips, { slotProps: { taskId: "task-1" } });
+  // Flush the pending host.storage.get() microtask chain so setLoaded/setTags
+  // fire and the chip row actually renders (initial render returns null).
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  const row = getTree();
+  assert.ok(row, "chip row renders once tags finish loading");
+  // jsx("div", props, tags.map(...)) passes the mapped array as a single
+  // child, so the rendered chip is nested one level deeper than row.children[0].
+  const chip = row.children[0][0];
+  const removeButton = chip.children[1];
+  assert.equal(removeButton.props["data-testid"], "kandev-tags-chip-remove");
+
+  let stopped = false;
+  removeButton.props.onClick({ stopPropagation: () => (stopped = true) });
+  assert.ok(
+    stopped,
+    "remove button's onClick must call stopPropagation so it doesn't bubble into the card's click-to-open handler",
+  );
+
+  let pointerDownStopped = false;
+  removeButton.props.onPointerDown({ stopPropagation: () => (pointerDownStopped = true) });
+  assert.ok(pointerDownStopped, "remove button's onPointerDown must also call stopPropagation");
+});
