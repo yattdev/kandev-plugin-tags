@@ -5,7 +5,7 @@ id: "kandev-plugin-tags"
 api_version: 1
 version: "0.1.2"
 display_name: "Tags"
-description: "Add one or more tags to a kanban card, stored privately per user, and shown as chips on the card."
+description: "Add one or more colored tags to a kanban card, stored privately per user, shown as chips on the card, with a Tags manager and (once the host supports it) a board filter."
 author: "yattdev"
 repo_url: "https://github.com/yattdev/kandev-plugin-tags"
 categories: ["tools"]
@@ -32,6 +32,9 @@ capabilities:
   user_state: true
 
 # ui.bundle points at the hand-written, no-build ES module frontend half:
-# a task-card-tags chip row plus an "Add tag..." kanban Edit-menu action.
+# a task-card-tags chip row, a redesigned "Add tag..." kanban Edit-menu
+# picker/creator modal, a "main-top-bar" Tags manager button/modal
+# (add/edit name+color/remove), and a feature-detected registerTaskFilter
+# board-filter contribution (no-ops until the host ships that hook).
 ui:
   bundle: "/ui/bundle.js"
