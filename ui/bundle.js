@@ -820,9 +820,21 @@
       }
     }
 
-    setWorkspace(host.store.getState().activeWorkspaceId || null);
+    function getActiveWorkspaceId() {
+      // The host's store keeps the active workspace at
+      // `state.workspaces.activeId` (apps/web/lib/state/slices/workspace/
+      // workspace-slice.ts) -- there is no top-level `activeWorkspaceId`
+      // field. Reading the wrong path silently returns `undefined` forever,
+      // which is why this must match the same shape every other workspaceId
+      // consumer in this file relies on (slotProps.workspaceId /
+      // context.workspaceId, both ultimately sourced from that slice).
+      var state = host.store.getState();
+      return (state && state.workspaces && state.workspaces.activeId) || null;
+    }
+
+    setWorkspace(getActiveWorkspaceId());
     host.store.subscribe(function () {
-      setWorkspace(host.store.getState().activeWorkspaceId || null);
+      setWorkspace(getActiveWorkspaceId());
     });
 
     registry.registerTaskFilter({

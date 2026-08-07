@@ -365,7 +365,7 @@ function makeMinimalHost(overrides) {
       },
       openModal: null,
       store: {
-        getState: () => ({ activeWorkspaceId: "ws-1" }),
+        getState: () => ({ workspaces: { activeId: "ws-1" } }),
         subscribe: () => () => {},
       },
     },
@@ -466,7 +466,7 @@ test("registerTaskFilter registers even when activeWorkspaceId isn't set yet, an
   };
   const host = makeMinimalHost({
     store: {
-      getState: () => ({ activeWorkspaceId }),
+      getState: () => ({ workspaces: { activeId: activeWorkspaceId } }),
       subscribe: (listener) => {
         storeListener = listener;
         return () => {};
@@ -567,7 +567,7 @@ test("TagChips resolves catalog colors and stops propagation on remove", async (
   const plugin = loadBundle();
   let TagChips;
   const fakeHost = makeFakeReactHost();
-  fakeHost.store = { getState: () => ({ activeWorkspaceId: "ws-1" }) };
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
   fakeHost.storage = {
     get(scope, scopeId, key) {
       if (scope === "task") return Promise.resolve({ value: ["t1"], updatedAt: "t0" });
@@ -617,7 +617,7 @@ test("TagChips falls back to legacy plain-string tags (unresolved id) with DEFAU
   const { DEFAULT_COLOR } = plugin.__internal;
   let TagChips;
   const fakeHost = makeFakeReactHost();
-  fakeHost.store = { getState: () => ({ activeWorkspaceId: "ws-1" }) };
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
   fakeHost.storage = {
     get(scope) {
       if (scope === "task") return Promise.resolve({ value: ["legacy-tag"], updatedAt: "t0" });
@@ -648,7 +648,7 @@ test("TagChips renders nothing while loading or when there are no tags", async (
   const plugin = loadBundle();
   let TagChips;
   const fakeHost = makeFakeReactHost();
-  fakeHost.store = { getState: () => ({ activeWorkspaceId: "ws-1" }) };
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
   fakeHost.storage = {
     get: () => Promise.resolve({ value: [], updatedAt: "t0" }),
     subscribe: () => () => {},
@@ -700,7 +700,7 @@ test("TagPickerModal's own create-and-apply refreshes its own list without any s
   const plugin = loadBundle();
   const { makeTagPickerModal } = plugin.__internal;
   const fakeHost = makeFakeReactHost();
-  fakeHost.store = { getState: () => ({ activeWorkspaceId: "ws-1" }) };
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
   fakeHost.storage = makeEchoSuppressingStorage();
 
   const TagPickerModal = makeTagPickerModal(fakeHost, "task-1", "ws-1");
