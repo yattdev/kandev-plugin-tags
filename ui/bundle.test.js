@@ -364,7 +364,10 @@ function makeMinimalHost(overrides) {
         subscribe: () => () => {},
       },
       openModal: null,
-      store: { getState: () => ({ activeWorkspaceId: "ws-1" }) },
+      store: {
+        getState: () => ({ activeWorkspaceId: "ws-1" }),
+        subscribe: () => () => {},
+      },
     },
     overrides,
   );
@@ -451,6 +454,59 @@ test("registerTaskFilter's matches() treats an unseen card as untagged", () => {
   );
   assert.equal(filterRegistration.matches({ taskId: "task-never-seen" }, ["tag-1"]), false);
   assert.equal(filterRegistration.matches({ taskId: "task-never-seen" }, []), true);
+});
+
+test("registerTaskFilter registers even when activeWorkspaceId isn't set yet, and picks up the catalog once host.store reports it", async () => {
+  const plugin = loadBundle();
+  let filterRegistration = null;
+  let storeListener = null;
+  let activeWorkspaceId = null;
+  const catalogByWorkspace = {
+    "ws-late": [{ id: "t1", name: "urgent", color: "#ef4444" }],
+  };
+  const host = makeMinimalHost({
+    store: {
+      getState: () => ({ activeWorkspaceId }),
+      subscribe: (listener) => {
+        storeListener = listener;
+        return () => {};
+      },
+    },
+    storage: {
+      get: (scope, scopeId, key) => {
+        if (scope === "workspace" && key === "tags-catalog") {
+          return Promise.resolve({ value: catalogByWorkspace[scopeId] || [], updatedAt: "t0" });
+        }
+        return Promise.resolve(undefined);
+      },
+      subscribe: () => () => {},
+    },
+  });
+  plugin.initialize(
+    {
+      registerComponent() {},
+      registerTaskMenuAction() {},
+      registerTaskFilter(registration) {
+        filterRegistration = registration;
+      },
+    },
+    host,
+  );
+  assert.ok(filterRegistration, "registers a task filter even with no active workspace yet");
+  assertStructural.deepEqual(
+    filterRegistration.getOptions().map((o) => o.value),
+    ["__untagged__"],
+    "no catalog entries visible before a workspace is known",
+  );
+
+  // The workspace resolves after boot; host.store notifies subscribers.
+  activeWorkspaceId = "ws-late";
+  storeListener();
+  await flush();
+
+  const optionValues = filterRegistration.getOptions().map((o) => o.value);
+  assert.ok(optionValues.includes("t1"), "catalog options appear once the workspace becomes known");
+  assert.ok(optionValues.includes("__untagged__"));
 });
 
 /**
@@ -610,4 +666,103 @@ test("TagChips renders nothing while loading or when there are no tags", async (
   const getTree = fakeHost.mount(TagChips, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
   await flush();
   assert.equal(getTree(), null);
+});
+
+/**
+ * Builds an in-memory host.storage backend whose `subscribe` never invokes
+ * its listener -- mirroring the host's real, documented behavior of
+ * suppressing a writer's own echo (PLUGIN-API.md's "own-tab echo
+ * suppression"). Any test using this backend can only pass if the component
+ * under test refreshes its own local state directly after a successful
+ * write, rather than depending on the subscription to do it.
+ */
+function makeEchoSuppressingStorage() {
+  const entries = {};
+  let counter = 0;
+  function keyFor(scope, scopeId, key) {
+    return scope + ":" + scopeId + ":" + key;
+  }
+  return {
+    get(scope, scopeId, key) {
+      return Promise.resolve(entries[keyFor(scope, scopeId, key)]);
+    },
+    set(scope, scopeId, key, value) {
+      counter += 1;
+      entries[keyFor(scope, scopeId, key)] = { value: value, updatedAt: "t" + counter };
+      return Promise.resolve(entries[keyFor(scope, scopeId, key)]);
+    },
+    // Never notifies -- the point of this fake.
+    subscribe: () => () => {},
+  };
+}
+
+test("TagPickerModal's own create-and-apply refreshes its own list without any subscribe notification", async () => {
+  const plugin = loadBundle();
+  const { makeTagPickerModal } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ activeWorkspaceId: "ws-1" }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+
+  const TagPickerModal = makeTagPickerModal(fakeHost, "task-1", "ws-1");
+  const getTree = fakeHost.mount(TagPickerModal, {});
+  await flush();
+
+  let tree = getTree();
+  const [inputEl, addButtonEl] = tree.children[0].children;
+  assert.equal(addButtonEl.props.disabled, true, "Add starts disabled with an empty draft");
+
+  inputEl.props.onChange({ target: { value: "urgent" } });
+  await flush();
+  tree = getTree();
+  const [, addButtonAfterTyping] = tree.children[0].children;
+  assert.equal(addButtonAfterTyping.props.disabled, false, "Add enables once a new, non-empty name is typed");
+
+  addButtonAfterTyping.props.onClick();
+  await flush();
+  await flush();
+  await flush();
+  await flush();
+  await flush();
+
+  tree = getTree();
+  const listChildren = tree.children[1].children[0];
+  assert.ok(Array.isArray(listChildren), "catalog list rendered (not the loading placeholder)");
+  const option = listChildren.find(function (o) {
+    return o.children[1].children[0] === "urgent";
+  });
+  assert.ok(option, "the newly created tag appears in this modal's own list, with no subscribe notification firing");
+  assert.equal(option.children[0].props.checked, true, "the newly created tag is applied to the task immediately");
+});
+
+test("TagManagerModal's own create refreshes its own list without any subscribe notification", async () => {
+  const plugin = loadBundle();
+  const { makeTagManagerModal } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.storage = makeEchoSuppressingStorage();
+
+  const TagManagerModal = makeTagManagerModal(fakeHost, "ws-1");
+  const getTree = fakeHost.mount(TagManagerModal, {});
+  await flush();
+
+  let tree = getTree();
+  const [inputEl] = tree.children[0].children;
+  inputEl.props.onChange({ target: { value: "blocked" } });
+  await flush();
+
+  tree = getTree();
+  const [, createButtonEl] = tree.children[0].children;
+  assert.equal(createButtonEl.props.disabled, false, "Create enables once a new name is typed");
+  createButtonEl.props.onClick();
+  await flush();
+  await flush();
+
+  tree = getTree();
+  const rows = tree.children[1].children[0];
+  assert.ok(Array.isArray(rows), "manager list rendered (not the loading placeholder)");
+  assert.ok(
+    rows.some(function (row) {
+      return row.children[2].props.defaultValue === "blocked";
+    }),
+    "the newly created tag appears in this modal's own list, with no subscribe notification firing",
+  );
 });

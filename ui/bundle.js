@@ -287,42 +287,51 @@
     var loadedState = React.useState(false);
     var loaded = loadedState[0];
     var setLoaded = loadedState[1];
+    // Stable mutable box (used in lieu of useRef, which isn't guaranteed on
+    // every host.React implementation) so `refresh` can be called directly
+    // right after this component's own write completes -- host.storage's
+    // subscribe intentionally suppresses a writer's own echo (see
+    // PLUGIN-API.md's "own-tab echo suppression"), so relying on the
+    // subscription alone would leave a modal that just wrote a value
+    // showing stale data until some other write/tab happens to refresh it.
+    // Not using a lazy initializer function here: the plugin's minimal test
+    // React host doesn't invoke function-form useState initializers, so a
+    // plain object literal (thrown away on renders after the first, same as
+    // React does with any non-function initial value) keeps this portable.
+    var box = React.useState({ generation: 0, cancelled: false })[0];
+
+    function refresh() {
+      var thisGeneration = ++box.generation;
+      host.storage.get(scope, scopeId, key).then(
+        function (entry) {
+          if (box.cancelled || thisGeneration !== box.generation) return;
+          setValue(sanitize(entry ? entry.value : undefined));
+          setLoaded(true);
+        },
+        function () {
+          if (box.cancelled || thisGeneration !== box.generation) return;
+          setLoaded(true);
+        },
+      );
+    }
 
     React.useEffect(
       function () {
-        var cancelled = false;
-        // Guards against an older in-flight read (triggered by an earlier
-        // subscribe notification) resolving after a newer one and clobbering
-        // it -- same ordering hazard as the fixture plugin's Notes panel.
-        var generation = 0;
-        function refresh() {
-          var thisGeneration = ++generation;
-          host.storage.get(scope, scopeId, key).then(
-            function (entry) {
-              if (cancelled || thisGeneration !== generation) return;
-              setValue(sanitize(entry ? entry.value : undefined));
-              setLoaded(true);
-            },
-            function () {
-              if (cancelled || thisGeneration !== generation) return;
-              setLoaded(true);
-            },
-          );
-        }
+        box.cancelled = false;
         refresh();
         var unsubscribe = host.storage.subscribe(
           { scope: scope, scopeId: scopeId, key: key, writerId: writerId },
           refresh,
         );
         return function () {
-          cancelled = true;
+          box.cancelled = true;
           unsubscribe();
         };
       },
       [scope, scopeId, key, writerId],
     );
 
-    return [value, loaded];
+    return [value, loaded, refresh];
   }
 
   function useTaskTagIds(host, taskId, writerId) {
@@ -434,9 +443,11 @@
       var tagIdsAndLoaded = useTaskTagIds(host, taskId, PICKER_WRITER_ID);
       var tagIds = tagIdsAndLoaded[0];
       var tagIdsLoaded = tagIdsAndLoaded[1];
+      var refreshTagIds = tagIdsAndLoaded[2];
       var catalogAndLoaded = useCatalog(host, workspaceId, PICKER_WRITER_ID);
       var catalog = catalogAndLoaded[0];
       var catalogLoaded = catalogAndLoaded[1];
+      var refreshCatalog = catalogAndLoaded[2];
       var draftState = React.useState("");
       var draft = draftState[0];
       var setDraft = draftState[1];
@@ -457,9 +468,11 @@
         var applying = tagIds.indexOf(id) === -1;
         readModifyWriteTaskTags(host, taskId, PICKER_WRITER_ID, function (current) {
           return applying ? addTaskTagId(current, id) : removeTaskTagId(current, id);
-        }).catch(function () {
-          setError("Could not update tag. Please try again.");
-        });
+        })
+          .then(refreshTagIds)
+          .catch(function () {
+            setError("Could not update tag. Please try again.");
+          });
       }
 
       function handleCreateAndApply() {
@@ -472,6 +485,7 @@
           return result.catalog;
         })
           .then(function () {
+            refreshCatalog();
             // Re-read so we apply the id the write actually produced (also
             // covers the case another tab created the same name meanwhile).
             return host.storage.get(CATALOG_SCOPE, workspaceId, CATALOG_KEY);
@@ -485,6 +499,7 @@
               return addTaskTagId(current, created.id);
             });
           })
+          .then(refreshTagIds)
           .catch(function () {
             setError("Could not create tag. Please try again.");
           });
@@ -577,6 +592,7 @@
       var catalogAndLoaded = useCatalog(host, workspaceId, MANAGER_WRITER_ID);
       var catalog = catalogAndLoaded[0];
       var loaded = catalogAndLoaded[1];
+      var refreshCatalog = catalogAndLoaded[2];
       var draftState = React.useState("");
       var draft = draftState[0];
       var setDraft = draftState[1];
@@ -596,6 +612,7 @@
         })
           .then(function () {
             setDraft("");
+            refreshCatalog();
           })
           .catch(function () {
             setError("Could not create tag. Please try again.");
@@ -605,25 +622,31 @@
       function handleRename(id, nextName) {
         readModifyWriteCatalog(host, workspaceId, MANAGER_WRITER_ID, function (current) {
           return updateCatalogTag(current, id, { name: nextName });
-        }).catch(function () {
-          setError("Could not rename tag. Please try again.");
-        });
+        })
+          .then(refreshCatalog)
+          .catch(function () {
+            setError("Could not rename tag. Please try again.");
+          });
       }
 
       function handleRecolor(id, nextColor) {
         readModifyWriteCatalog(host, workspaceId, MANAGER_WRITER_ID, function (current) {
           return updateCatalogTag(current, id, { color: nextColor });
-        }).catch(function () {
-          setError("Could not recolor tag. Please try again.");
-        });
+        })
+          .then(refreshCatalog)
+          .catch(function () {
+            setError("Could not recolor tag. Please try again.");
+          });
       }
 
       function handleRemove(id) {
         readModifyWriteCatalog(host, workspaceId, MANAGER_WRITER_ID, function (current) {
           return removeCatalogTag(current, id);
-        }).catch(function () {
-          setError("Could not remove tag. Please try again.");
-        });
+        })
+          .then(refreshCatalog)
+          .catch(function () {
+            setError("Could not remove tag. Please try again.");
+          });
       }
 
       return jsx(
@@ -755,17 +778,52 @@
   // registerTaskFilter (feature-detected -- no-ops on hosts predating it)
   // ---------------------------------------------------------------------
 
-  function registerTagFilter(registry, host, workspaceId) {
+  function registerTagFilter(registry, host) {
     if (typeof registry.registerTaskFilter !== "function") return;
 
     var catalog = [];
+    var currentWorkspaceId = null;
+    var unsubscribeStorage = null;
+
     function refreshCatalog() {
-      host.storage.get(CATALOG_SCOPE, workspaceId, CATALOG_KEY).then(function (entry) {
+      if (!currentWorkspaceId) {
+        catalog = [];
+        return;
+      }
+      host.storage.get(CATALOG_SCOPE, currentWorkspaceId, CATALOG_KEY).then(function (entry) {
         catalog = sanitizeCatalog(entry ? entry.value : []);
       });
     }
-    refreshCatalog();
-    host.storage.subscribe({ scope: CATALOG_SCOPE, scopeId: workspaceId, key: CATALOG_KEY }, refreshCatalog);
+
+    // The active workspace is not necessarily known yet the moment
+    // initialize() runs (SPA route hydration can populate it slightly
+    // later), so register unconditionally and track host.store's
+    // activeWorkspaceId reactively instead of gating registration on an
+    // initial snapshot -- otherwise the filter section could silently
+    // never appear if the plugin initializes before the workspace route
+    // resolves.
+    function setWorkspace(workspaceId) {
+      if (workspaceId === currentWorkspaceId) return;
+      currentWorkspaceId = workspaceId || null;
+      if (unsubscribeStorage) {
+        unsubscribeStorage();
+        unsubscribeStorage = null;
+      }
+      if (currentWorkspaceId) {
+        refreshCatalog();
+        unsubscribeStorage = host.storage.subscribe(
+          { scope: CATALOG_SCOPE, scopeId: currentWorkspaceId, key: CATALOG_KEY },
+          refreshCatalog,
+        );
+      } else {
+        catalog = [];
+      }
+    }
+
+    setWorkspace(host.store.getState().activeWorkspaceId || null);
+    host.store.subscribe(function () {
+      setWorkspace(host.store.getState().activeWorkspaceId || null);
+    });
 
     registry.registerTaskFilter({
       id: "tags",
@@ -811,14 +869,13 @@
         },
       });
 
-      // Deliberately not scoped per-workspace at init time -- the top-bar
-      // button and each card's own slotProps carry the active workspaceId,
-      // but registerTaskFilter has no per-workspace concept today, so we key
-      // the filter to whichever workspace is active when the plugin
-      // initializes. Revisit if/when multi-workspace boards need
-      // per-workspace filter option sets.
-      var initialWorkspaceId = host.store.getState().activeWorkspaceId || null;
-      if (initialWorkspaceId) registerTagFilter(registry, host, initialWorkspaceId);
+      // registerTagFilter tracks host.store's activeWorkspaceId reactively
+      // (see its own comment) -- registerTaskFilter has no per-workspace
+      // concept today, so the filter's options always reflect whichever
+      // workspace is currently active, updating live if the user switches
+      // workspaces. Registered unconditionally (safe no-op via feature
+      // detection on hosts predating registerTaskFilter).
+      registerTagFilter(registry, host);
     },
     // Exposed for ui/bundle.test.js only -- not part of the KandevPlugin
     // contract consumed by the host, which only reads `initialize`.
@@ -844,6 +901,8 @@
       PALETTE: PALETTE,
       DEFAULT_COLOR: DEFAULT_COLOR,
       UNTAGGED_FILTER_VALUE: UNTAGGED_FILTER_VALUE,
+      makeTagPickerModal: makeTagPickerModal,
+      makeTagManagerModal: makeTagManagerModal,
     },
   });
 })();
