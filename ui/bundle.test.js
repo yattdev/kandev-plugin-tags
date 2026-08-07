@@ -389,9 +389,8 @@ test("bundle registers the task-card-tags slot, the main-top-bar button, and the
   assert.ok(registered.components.some((c) => c.slot === "main-top-bar"));
   const addTagAction = registered.menuActions.find((a) => a.id === "add-tag");
   assert.ok(addTagAction, "registers an add-tag menu action");
-  // Stays under "edit" until the host ships the "primary" flat top-level
-  // group -- see the NOTE in bundle.js next to this registration.
-  assert.equal(addTagAction.group, "edit");
+  // Flat, top-level item -- shipped in kdlbs/kandev PR #2351.
+  assert.equal(addTagAction.group, "primary");
 });
 
 test("bundle registers a Tags task filter when the host supports registerTaskFilter", () => {

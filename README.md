@@ -6,12 +6,12 @@ user's tags and tag catalog are private and never shown to teammates.
 - **On every card**: tags you've added render as a row of small colored
   chips below the card's other badges. No tags, no row -- the row only
   appears once you've added at least one.
-- **Add/pick a tag**: open a card's context/dropdown menu, choose **Edit >
-  Add tag...**. A modal shows a large search/create input (typing a name
-  that doesn't exist yet enables **Add**, which creates it in your tag
-  catalog and applies it to the card) plus a scrollable, multi-select list
-  of your existing colored tags -- check/uncheck to apply/remove them from
-  this card.
+- **Add/pick a tag**: open a card's context/dropdown menu, choose **Add
+  tag...** (a flat, top-level item between "Move to" and "Link"). A modal
+  shows a large search/create input (typing a name that doesn't exist yet
+  enables **Add**, which creates it in your tag catalog and applies it to
+  the card) plus a scrollable, multi-select list of your existing colored
+  tags -- check/uncheck to apply/remove them from this card.
 - **Manage your tags**: a **Tags** button in the app's top bar opens a
   management modal listing your whole tag catalog, where you can create,
   rename, recolor (hex input or a native color-picker swatch), and delete
@@ -19,11 +19,11 @@ user's tags and tag catalog are private and never shown to teammates.
   stops resolving, so it no longer renders).
 - **Remove a tag from a card**: click the `x` on a chip on the card itself,
   or uncheck it in the Add tag modal.
-- **Filter the board by tags**: once the host ships the paired
-  `registerTaskFilter` extension point (tracked in a separate host-hook
-  PR), a **Tags** section appears in the board's existing filter dropdown,
-  supporting multi-select plus an **Untagged** option. Until then this
-  plugin feature-detects the hook and silently no-ops.
+- **Filter the board by tags**: a **Tags** section in the board's existing
+  filter dropdown supports multi-select plus an **Untagged** option
+  (requires a host that ships `registerTaskFilter`, e.g. kdlbs/kandev
+  main after PR #2351; this plugin feature-detects the hook and silently
+  no-ops on older hosts).
 - Tag names are trimmed, capped at 32 characters, deduplicated
   case-insensitively within your catalog; each card is capped at 12 applied
   tags.

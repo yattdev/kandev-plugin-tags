@@ -6,15 +6,15 @@
  *
  *   - a "task-card-tags" slot component (TagChips) rendering the current
  *     user's tags for a card as a colored chip row;
- *   - a registerTaskMenuAction under the kanban card's "edit" group
+ *   - a registerTaskMenuAction under the kanban card's "primary" group
  *     ("Add tag...") that opens a redesigned host.openModal editor
  *     (TagPickerModal) to search/create and multi-select tags for the card;
  *   - a "main-top-bar" slot button ("Tags") that opens a management modal
  *     (TagManagerModal) to add/edit(name, color)/remove tags from the
  *     user's tag catalog;
  *   - (feature-detected) a `registerTaskFilter` contribution to the board's
- *     filter dropdown, active only once the host ships that extension point
- *     (see the "Tags plugin: task-menu + task-filter host hooks" PR).
+ *     filter dropdown, active only on hosts that ship that extension point
+ *     (shipped in kdlbs/kandev PR #2351; no-ops on older hosts).
  *
  * Data model (v2): each user has a *catalog* of named, colored tags --
  * `{ id, name, color }` -- stored once per workspace (host.storage scope
@@ -799,12 +799,9 @@
       registry.registerTaskMenuAction({
         id: "add-tag",
         label: "Add tag\u2026",
-        // NOTE: stays under "edit" until the host ships the "primary" flat
-        // top-level menu group (see the paired host-hook PR/subtask) --
-        // registering an unrecognized group today would silently drop this
-        // action from the menu entirely. Flip this to "primary" once that
-        // lands.
-        group: "edit",
+        // Flat, top-level item between "Move to"/"Send to workflow" and
+        // "Link" -- shipped in kdlbs/kandev PR #2351.
+        group: "primary",
         run: function (context) {
           return host.openModal({
             title: "Tags",
