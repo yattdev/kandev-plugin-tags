@@ -30,9 +30,11 @@ user's tags and tag catalog are private and never shown to teammates.
 
 ## Install
 
-Build a package (`make package-host` for your platform, `make package` for
-all platforms) and install the tarball via **Settings > Plugins > Install**
-or `POST /api/plugins/install`.
+Building requires a local checkout of the Kandev SDK first -- run `make
+setup` once (see **Development > Setup / Prerequisites** below), then build
+a package (`make package-host` for your platform, `make package` for all
+platforms) and install the tarball via **Settings > Plugins > Install** or
+`POST /api/plugins/install`.
 
 ## How it works and what it reads
 
@@ -64,9 +66,47 @@ service or analytics integration.
 ## Development
 
 Developed against a local checkout of the kandev monorepo (see the
-`replace` directive in `go.mod`) -- check this repository out as a sibling
-directory of your `kandev` checkout (e.g. `../kandev` relative to this
-repo), or adjust the `replace` path accordingly.
+`replace` directive in `go.mod`). CI and monorepo development use a sibling
+checkout named `kandev` next to this repo, e.g.:
+
+```
+some-parent-dir/
+├── kandev-plugin-tags/   (this repo)
+└── kandev/
+    └── apps/backend/     (from kdlbs/kandev)
+```
+
+### Setup / Prerequisites
+
+Before building, get the Kandev SDK checked out using:
+
+```sh
+make setup   # sparse-clones kdlbs/kandev's apps/backend into .build/kandev
+```
+
+Makefile targets use `../kandev/apps/backend` automatically when that sibling
+checkout already exists. Otherwise `make setup` creates the SDK under this
+repo's ignored `.build/kandev/apps/backend` directory and the Makefile
+temporarily points Go's local `replace` there while each target runs.
+
+If you prefer the sibling layout, create it manually:
+
+```sh
+git clone --filter=blob:none --sparse https://github.com/kdlbs/kandev ../kandev
+git -C ../kandev sparse-checkout set apps/backend
+```
+
+If your monorepo checkout lives elsewhere, override the path instead of
+editing `go.mod`:
+
+```sh
+make setup KANDEV_SDK=/path/to/kandev/apps/backend
+make package-host KANDEV_SDK=/path/to/kandev/apps/backend
+```
+
+`build`, `test`, `vet`, `package`, and `package-host` all check for the SDK
+first (`make check-sdk`) and fail fast with an actionable message if it's
+missing.
 
 ```sh
 make test        # Go unit tests + dependency-free UI helper/storage tests
