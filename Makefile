@@ -5,15 +5,12 @@ VERSION := 0.1.2
 STAGE := .build/stage
 PKG_OUT := kandev-plugin-tags-$(VERSION).tar.gz
 
-# go.mod keeps the sibling-repo replace used by CI and monorepo development.
-# Local Makefile builds use that checkout when present; otherwise `make setup`
-# creates a repo-local sparse checkout under .build/kandev and temporarily
-# points the replace there for the duration of each Make target.
+# Path to a local checkout of github.com/kandev/kandev's apps/backend,
+# matching go.mod's `replace github.com/kandev/kandev => ../kandev/apps/backend`.
+# Override for a non-standard layout, e.g.:
 #   make package-host KANDEV_SDK=/path/to/kandev/apps/backend
-GO_MOD_KANDEV_SDK := ../kandev/apps/backend
-SETUP_KANDEV_REPO := ./.build/kandev
-SETUP_KANDEV_SDK := $(SETUP_KANDEV_REPO)/apps/backend
-KANDEV_SDK ?= $(if $(wildcard $(GO_MOD_KANDEV_SDK)),$(GO_MOD_KANDEV_SDK),$(SETUP_KANDEV_SDK))
+DEFAULT_KANDEV_SDK := ../kandev/apps/backend
+KANDEV_SDK ?= $(DEFAULT_KANDEV_SDK)
 
 # Verifies the local Kandev SDK checkout (required by go.mod's `replace`)
 # is present before attempting a build, and fails fast with an actionable
@@ -21,54 +18,32 @@ KANDEV_SDK ?= $(if $(wildcard $(GO_MOD_KANDEV_SDK)),$(GO_MOD_KANDEV_SDK),$(SETUP
 check-sdk:
 	@test -d "$(KANDEV_SDK)" || { \
 		echo "ERROR: Kandev SDK not found at $(KANDEV_SDK)."; \
-		echo "Run 'make setup' (sparse-clones kdlbs/kandev apps/backend into $(SETUP_KANDEV_REPO)),"; \
+		echo "Run 'make setup' (clones kdlbs/kandev apps/backend into ../kandev),"; \
 		echo "or see README.md > Development."; \
 		echo "Override with: make <target> KANDEV_SDK=/path/to/kandev/apps/backend"; \
 		exit 1; \
 	}
 
-# Sparse-clones kdlbs/kandev (apps/backend only) for Makefile builds. If the
-# go.mod sibling checkout exists, this target is a no-op. Otherwise it creates
-# .build/kandev by default, avoiding collisions with unrelated ../kandev dirs.
+# Sparse-clones kdlbs/kandev (apps/backend only) into ../kandev so go.mod's
+# local `replace` directive resolves. No-ops if ../kandev already exists.
 setup:
-	@KSDK="$(KANDEV_SDK)"; \
-	SDK_REPO="$$(dirname "$$(dirname "$$KSDK")")"; \
-	if [ -d "$$KSDK" ]; then \
-		echo "Kandev SDK already exists at $$KSDK."; \
-	elif [ -e "$$SDK_REPO" ]; then \
-		REMOTE="$$(git -C "$$SDK_REPO" remote get-url origin 2>/dev/null || true)"; \
-		case "$$REMOTE" in \
-			*github.com:kdlbs/kandev*|*github.com/kdlbs/kandev*) \
-				echo "Configuring existing kdlbs/kandev checkout at $$SDK_REPO for apps/backend..."; \
-				git -C "$$SDK_REPO" sparse-checkout set apps/backend ;; \
-			*) \
-				echo "ERROR: $$SDK_REPO already exists but is not a kdlbs/kandev checkout."; \
-				echo "Choose another location, e.g. make setup KANDEV_SDK=./.build/kandev/apps/backend"; \
-				exit 1 ;; \
-		esac; \
+	@if [ -d ../kandev ]; then \
+		echo "../kandev already exists -- skipping clone."; \
 	else \
-		echo "Cloning kdlbs/kandev (apps/backend) into $$SDK_REPO..."; \
-		mkdir -p "$$(dirname "$$SDK_REPO")" && \
-		git clone --filter=blob:none --sparse https://github.com/kdlbs/kandev "$$SDK_REPO" && \
-		git -C "$$SDK_REPO" sparse-checkout set apps/backend; \
-	fi; \
-	test -d "$$KSDK" || { \
-		echo "ERROR: setup completed but $$KSDK was not created."; \
-		exit 1; \
-	}
+		echo "Cloning kdlbs/kandev (apps/backend) into ../kandev..."; \
+		git clone --filter=blob:none --sparse https://github.com/kdlbs/kandev ../kandev && \
+		git -C ../kandev sparse-checkout set apps/backend; \
+	fi
 
-# When KANDEV_SDK differs from the go.mod-committed sibling path, temporarily
-# point the `replace` at it for the command, then restore go.mod on exit
+# When KANDEV_SDK differs from the go.mod-committed default, temporarily
+# point the `replace` at it for the build, then restore go.mod on exit
 # (success or failure) so the committed file -- and CI's `go mod tidy`
 # tidiness gate -- stay untouched.
 define with-sdk-override
-@KSDK="$(KANDEV_SDK)"; GMOD="$(GO_MOD_KANDEV_SDK)"; tmp=""; \
-trap 'rc=$$?; [ -n "$$tmp" ] && cp "$$tmp" go.mod && rm -f "$$tmp"; exit $$rc' EXIT; \
-set -e; \
-case "$$KSDK" in /*|./*|../*) GOMOD_KSDK="$$KSDK" ;; *) GOMOD_KSDK="./$$KSDK" ;; esac; \
-if [ "$$GOMOD_KSDK" != "$$GMOD" ]; then tmp="$$(mktemp)"; cp go.mod "$$tmp"; go mod edit -replace github.com/kandev/kandev="$$GOMOD_KSDK"; fi; \
-set +e; \
-( $(1) ); rc=$$?; exit $$rc
+@KSDK="$(KANDEV_SDK)"; DEFAULT="$(DEFAULT_KANDEV_SDK)"; rc=0; \
+if [ "$$KSDK" != "$$DEFAULT" ]; then go mod edit -replace github.com/kandev/kandev=$$KSDK; fi; \
+trap '[ "$$KSDK" != "$$DEFAULT" ] && git checkout -- go.mod; exit $$rc' EXIT; \
+( $(1) ); rc=$$?
 endef
 
 build: check-sdk
@@ -77,15 +52,15 @@ build: check-sdk
 run: build
 	./$(BIN)
 
-test: check-sdk
-	$(call with-sdk-override,go test ./server/...)
+test:
+	go test ./server/...
 	node --test ui/bundle.test.js
 
 fmt:
-	gofmt -l ./server
+	gofmt -l .
 
-vet: check-sdk
-	$(call with-sdk-override,go vet ./server/...)
+vet:
+	go vet ./server/...
 
 package: check-sdk
 	rm -rf $(STAGE)

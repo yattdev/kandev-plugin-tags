@@ -66,8 +66,8 @@ service or analytics integration.
 ## Development
 
 Developed against a local checkout of the kandev monorepo (see the
-`replace` directive in `go.mod`). CI and monorepo development use a sibling
-checkout named `kandev` next to this repo, e.g.:
+`replace` directive in `go.mod`), which must be present as a sibling
+directory named `kandev` next to this repo, e.g.:
 
 ```
 some-parent-dir/
@@ -78,35 +78,29 @@ some-parent-dir/
 
 ### Setup / Prerequisites
 
-Before building, get the Kandev SDK checked out using:
+Before building, get the Kandev SDK checked out at `../kandev/apps/backend`
+(relative to this repo) using **one** of:
 
 ```sh
-make setup   # sparse-clones kdlbs/kandev's apps/backend into .build/kandev
+make setup   # sparse-clones kdlbs/kandev's apps/backend into ../kandev
 ```
 
-Makefile targets use `../kandev/apps/backend` automatically when that sibling
-checkout already exists. Otherwise `make setup` creates the SDK under this
-repo's ignored `.build/kandev/apps/backend` directory and the Makefile
-temporarily points Go's local `replace` there while each target runs.
-
-If you prefer the sibling layout, create it manually:
+or manually:
 
 ```sh
 git clone --filter=blob:none --sparse https://github.com/kdlbs/kandev ../kandev
 git -C ../kandev sparse-checkout set apps/backend
 ```
 
-If your monorepo checkout lives elsewhere, override the path instead of
-editing `go.mod`:
+If your monorepo checkout lives elsewhere, override the path per-invocation
+instead of editing `go.mod`:
 
 ```sh
-make setup KANDEV_SDK=/path/to/kandev/apps/backend
 make package-host KANDEV_SDK=/path/to/kandev/apps/backend
 ```
 
-`build`, `test`, `vet`, `package`, and `package-host` all check for the SDK
-first (`make check-sdk`) and fail fast with an actionable message if it's
-missing.
+`build`, `package`, and `package-host` all check for the SDK first (`make
+check-sdk`) and fail fast with an actionable message if it's missing.
 
 ```sh
 make test        # Go unit tests + dependency-free UI helper/storage tests
