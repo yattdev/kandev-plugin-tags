@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.3.0] - 2026-08-10
+
+### Changed
+
+- fix: restore the top-bar dropdown's Create input (AC2) (fb35c9e)
+- fix: restore tag recoloring and the 12-tag cap message (342ed9b)
+- fix: creating a tag always failed, and rebuild the tag UX (40bb3a0)
+- Revert "fix: document and preflight-check the Kandev SDK sibling checkout" (8d9a6c5)
+- Revert "fix: make local SDK setup self-contained" (6ad14ce)
+- fix: make local SDK setup self-contained (5b5c945)
+- fix: document and preflight-check the Kandev SDK sibling checkout (8a871c8)
+- fix: make local SDK setup self-contained (3a3c065)
+- fix: document and preflight-check the Kandev SDK sibling checkout (46444b9)
+- fix: read active workspace from state.workspaces.activeId (be99296)
+- fix: refresh own-write local state and track workspace reactively (e3cceb2)
+- feat: switch add-tag menu action to the host's flat primary group (b0fc9ef)
+- feat: redesign tag data model with a colored catalog, picker/manager modals (12ac076)
+- fix: drop non-string entries from stored tags before rendering (f69f8f3)
+- test: cover chip remove button stopPropagation regression (9abb61b)
+
+
 ## [0.2.0] - 2026-08-09
 
 ### Fixed
