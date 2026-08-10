@@ -15,17 +15,22 @@ user's tags and tag catalog are private and never shown to teammates.
   from this card; applied tags show a checkmark.
 - **Filter and manage from one place**: a filter-icon button in the app's
   top bar opens a dropdown listing your whole tag catalog as
-  checkbox + colored pill rows. On a host new enough to support it
-  (`host.taskFilters`/`host.storage.listByKey`), checking a row filters the
-  board to cards carrying that tag (multi-select is OR) and the same
-  dropdown is where you rename (click a pill) or delete a tag -- delete asks
-  for confirmation stating the exact number of cards carrying the tag, and
+  color-swatch + colored pill rows, with its own **Create** input above the
+  list (independent of the Add tag modal -- creating a tag here works the
+  same way: trimmed, deduplicated case-insensitively, a specific error if
+  the name already exists). On a host new enough to support it
+  (`host.taskFilters`/`host.storage.listByKey`), each row also gets a
+  checkbox, and checking one filters the board to cards carrying that tag
+  (multi-select is OR). The same dropdown is where you recolor (click the
+  swatch), rename (click a pill), or delete a tag -- delete asks for
+  confirmation stating the exact number of cards carrying the tag, and
   removes it from both the catalog and every one of those cards. On an
-  older host without those two APIs, this dropdown is manage-only (no
-  checkboxes) and, if the host at least ships `registerTaskFilter`, the
-  board's existing built-in filter dropdown keeps its own "Tags"
-  section/Untagged option instead, so filtering is never lost, only
-  relocated depending on what the host supports.
+  older host without `host.taskFilters`/`host.storage.listByKey`, the
+  checkboxes are omitted and, if the host at least ships
+  `registerTaskFilter`, the board's existing built-in filter dropdown keeps
+  its own "Tags" section/Untagged option instead, so filtering is never
+  lost, only relocated depending on what the host supports -- creating,
+  recoloring, renaming, and deleting stay available here regardless of tier.
 - **Remove a tag from a card**: click the `x` on a chip on the card itself,
   or click it off in the Add tag modal.
 - Tag names are trimmed, capped at 32 characters, deduplicated

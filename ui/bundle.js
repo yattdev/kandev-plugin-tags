@@ -586,10 +586,22 @@
       function toggleTag(id) {
         setError(null);
         var applying = tagIds.indexOf(id) === -1;
+        var changed = false;
         readModifyWriteTaskTags(host, taskId, PICKER_WRITER_ID, function (current) {
-          return applying ? addTaskTagId(current, id) : removeTaskTagId(current, id);
+          var next = applying ? addTaskTagId(current, id) : removeTaskTagId(current, id);
+          changed = next !== current;
+          return next;
         })
-          .then(refreshTagIds)
+          .then(function () {
+            if (!changed && applying) {
+              // The card is already at MAX_TAGS_PER_TASK -- addTaskTagId
+              // silently returns the same reference (D10); surface it
+              // instead of leaving the checkbox looking like it did nothing.
+              setError("This card already has " + MAX_TAGS_PER_TASK + " tags. Remove one before adding another.");
+              return;
+            }
+            refreshTagIds();
+          })
           .catch(function (err) {
             logError("toggle tag", err);
             setError(withDetail("Could not update tag. Please try again.", err));
@@ -986,9 +998,46 @@
       var errorState = React.useState(null);
       var error = errorState[0];
       var setError = errorState[1];
+      var draftState = React.useState("");
+      var draft = draftState[0];
+      var setDraft = draftState[1];
 
       var displayError =
         error || (loadError ? withDetail("Could not load tags. Please try again.", loadError) : null);
+      var draftName = normalizeName(draft);
+      var canCreate =
+        !!resolvedWorkspaceId &&
+        loaded &&
+        !loadError &&
+        draftName !== null &&
+        findTagByName(catalog, draftName) === null;
+
+      function handleCreate() {
+        if (!canCreate) return;
+        setError(null);
+        var createdTag = null;
+        readModifyWriteCatalog(host, resolvedWorkspaceId, MANAGER_WRITER_ID, function (current) {
+          var result = addCatalogTag(current, draft, null);
+          if (result === null) return current;
+          createdTag = result.tag;
+          return result.catalog;
+        })
+          .then(function () {
+            if (!createdTag) {
+              // Another tab created this exact name between our disabled-
+              // state check and this write (D6) -- surface it, don't clear
+              // the input and pretend it succeeded.
+              setError('A tag named "' + draftName + '" already exists.');
+              return;
+            }
+            setDraft("");
+            refreshCatalog();
+          })
+          .catch(function (err) {
+            logError("create tag", err);
+            setError(withDetail("Could not create tag. Please try again.", err));
+          });
+      }
 
       function toggleFilter(id) {
         if (!capabilities.filterSelectionApi) return;
@@ -1027,6 +1076,18 @@
             logError("rename tag", err);
             setRenamingId(null);
             setError(withDetail("Could not rename tag. Please try again.", err));
+          });
+      }
+
+      function handleRecolor(id, nextColor) {
+        setError(null);
+        readModifyWriteCatalog(host, resolvedWorkspaceId, MANAGER_WRITER_ID, function (current) {
+          return updateCatalogTag(current, id, { color: nextColor });
+        })
+          .then(refreshCatalog)
+          .catch(function (err) {
+            logError("recolor tag", err);
+            setError(withDetail("Could not recolor tag. Please try again.", err));
           });
       }
 
@@ -1080,6 +1141,35 @@
             capabilities.filterSelectionApi ? "Filter by tag" : "Manage tags",
           ),
           jsx(ui.DropdownMenuSeparator, null),
+          jsx(
+            "div",
+            { style: { display: "flex", gap: "6px", padding: "4px 8px" } },
+            jsx(ui.Input, {
+              "data-testid": "kandev-tags-topbar-create-input",
+              value: draft,
+              placeholder: "New tag name…",
+              maxLength: MAX_TAG_LENGTH,
+              style: { flex: 1, height: "28px" },
+              onChange: function (e) {
+                setDraft(e.target.value);
+              },
+              onKeyDown: function (e) {
+                if (e.key === "Enter") handleCreate();
+              },
+            }),
+            jsx(
+              ui.Button,
+              {
+                type: "button",
+                size: "sm",
+                "data-testid": "kandev-tags-topbar-create",
+                disabled: !canCreate,
+                onClick: handleCreate,
+              },
+              "Create",
+            ),
+          ),
+          jsx(ui.DropdownMenuSeparator, null),
           !loaded
             ? jsx("div", { className: "text-muted-foreground text-xs px-2 py-1.5" }, "Loading…")
             : catalog.length === 0
@@ -1093,6 +1183,29 @@
                       "data-testid": "kandev-tags-topbar-row",
                       style: { display: "flex", alignItems: "center", gap: "8px", padding: "4px 8px" },
                     },
+                    // Uncontrolled + commit-on-blur, same rationale as the
+                    // retired Manage Tags modal's color picker (D9): the
+                    // native picker's own onChange can fire continuously
+                    // while dragging, so committing there would write on
+                    // every intermediate hue.
+                    jsx("input", {
+                      type: "color",
+                      "data-testid": "kandev-tags-topbar-color",
+                      "aria-label": "Recolor tag " + tag.name,
+                      defaultValue: tag.color,
+                      style: {
+                        width: "20px",
+                        height: "20px",
+                        padding: 0,
+                        border: "none",
+                        background: "none",
+                        cursor: "pointer",
+                        flexShrink: 0,
+                      },
+                      onBlur: function (e) {
+                        if (e.target.value !== tag.color) handleRecolor(tag.id, e.target.value);
+                      },
+                    }),
                     capabilities.filterSelectionApi
                       ? jsx(ui.Checkbox, {
                           "data-testid": "kandev-tags-topbar-checkbox",

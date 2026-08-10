@@ -29,13 +29,15 @@
 - The `Add tag...` kanban menu item now has a tag icon, sized and stroked to
   match its neighbours (`Move to`/`Archive`/`Delete`).
 - The top-bar "Tags" button is now a filter-icon dropdown that combines
-  filtering and management in one place (checkbox + colored pill rows,
-  inline rename, delete with an exact "used by N cards" count and cascade
-  removal from every affected card) on a host that supports
-  `host.taskFilters` and `host.storage.listByKey`. On a host with only
-  `registerTaskFilter`, this dropdown is manage-only and the board's
-  built-in filter dropdown keeps its own "Tags" section as before. On an
-  even older host, it's manage-only with no filtering available at all.
+  filtering and management in one place: its own **Create** input, a color
+  swatch, inline rename, and delete with an exact "used by N cards" count
+  and cascade removal from every affected card -- plus, on a host that
+  supports `host.taskFilters` and `host.storage.listByKey`, a checkbox per
+  row for filtering. On a host with only `registerTaskFilter`, the
+  checkboxes are omitted and the board's built-in filter dropdown keeps its
+  own "Tags" section as before; on an even older host, there's no filtering
+  at all. Create/recolor/rename/delete are available in this dropdown
+  regardless of tier.
 - The add-tags picker modal is rebuilt on `host.ui` primitives (Input,
   Button, ScrollArea), opens at `size: "md"`, and lets you click any row in
   the scrollable tag list to apply/remove it (a checkmark marks applied
