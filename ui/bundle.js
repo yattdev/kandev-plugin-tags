@@ -44,7 +44,9 @@
   var MAX_TAG_LENGTH = 32;
   var MAX_TAGS_PER_TASK = 12;
   var CONFLICT_RETRY_LIMIT = 1;
+  var RECOLOR_DEBOUNCE_MS = 300;
   var UNTAGGED_FILTER_VALUE = "__untagged__";
+  var TAGS_FILTER_ID = "tags";
 
   // Distinct writerIds (not the shared per-tab default) so one surface's own
   // subscription doesn't treat another open surface's writes as its own echo
@@ -226,6 +228,33 @@
   }
 
   /**
+   * Single choke point for surfacing a storage-boundary failure: logs
+   * `[kandev-plugin-tags] <context>` plus the underlying Error to the
+   * console so the real HTTP status (embedded in host.storage's rejection
+   * message) is visible instead of only the generic UI message.
+   */
+  function logError(context, err) {
+    console.error("[kandev-plugin-tags] " + context, err);
+  }
+
+  /**
+   * Resolves the workspace id to scope catalog storage under. Rejects
+   * blank/whitespace-only/undefined/null and the literal string "null"
+   * (the JSON-stringified form of a null slotProps.workspaceId, which
+   * would otherwise pass straight through to encodeURIComponent and read/
+   * write a bogus "null" scopeId bucket), falling back to the host's own
+   * `workspaces.activeId`. Returns null when nothing resolves -- callers
+   * treat that as "no active workspace" and skip storage calls entirely.
+   */
+  function resolveWorkspaceId(host, candidate) {
+    var trimmed = typeof candidate === "string" ? candidate.trim() : "";
+    if (trimmed && trimmed !== "null") return trimmed;
+    var state = host.store.getState();
+    var active = state && state.workspaces && state.workspaces.activeId;
+    return active || null;
+  }
+
+  /**
    * Reads the current value at (scope, scopeId, key), applies `mutate`, and
    * writes the result back with `ifUnmodifiedSince` set to what was just
    * read. Retries once on a PluginStorageConflictError by re-reading and
@@ -279,6 +308,14 @@
   // Hooks
   // ---------------------------------------------------------------------
 
+  /**
+   * Returns `[value, loaded, refresh, error]`. A rejected `host.storage.get`
+   * sets `error` (and logs it via `logError`) instead of quietly settling on
+   * `value`'s empty default -- a failing read must never render as a healthy
+   * empty catalog (D1), or the only place the failure ever surfaces is the
+   * write path, with a generic "could not create" message that hides the
+   * real cause.
+   */
   function useStorageValue(host, scope, scopeId, key, writerId, sanitize) {
     var React = host.React;
     var valueState = React.useState([]);
@@ -287,6 +324,9 @@
     var loadedState = React.useState(false);
     var loaded = loadedState[0];
     var setLoaded = loadedState[1];
+    var errorState = React.useState(null);
+    var error = errorState[0];
+    var setError = errorState[1];
     // Stable mutable box (used in lieu of useRef, which isn't guaranteed on
     // every host.React implementation) so `refresh` can be called directly
     // right after this component's own write completes -- host.storage's
@@ -300,17 +340,32 @@
     // React does with any non-function initial value) keeps this portable.
     var box = React.useState({ generation: 0, cancelled: false })[0];
 
+    if (!scopeId) {
+      // No active workspace/task -- skip the storage call entirely (AC6)
+      // rather than issuing a request the backend will reject.
+      scopeId = null;
+    }
+
     function refresh() {
+      if (!scopeId) {
+        setValue([]);
+        setLoaded(true);
+        setError(null);
+        return;
+      }
       var thisGeneration = ++box.generation;
       host.storage.get(scope, scopeId, key).then(
         function (entry) {
           if (box.cancelled || thisGeneration !== box.generation) return;
           setValue(sanitize(entry ? entry.value : undefined));
           setLoaded(true);
+          setError(null);
         },
-        function () {
+        function (err) {
           if (box.cancelled || thisGeneration !== box.generation) return;
+          logError("load " + scope + "/" + key, err);
           setLoaded(true);
+          setError(err);
         },
       );
     }
@@ -319,6 +374,7 @@
       function () {
         box.cancelled = false;
         refresh();
+        if (!scopeId) return undefined;
         var unsubscribe = host.storage.subscribe(
           { scope: scope, scopeId: scopeId, key: key, writerId: writerId },
           refresh,
@@ -331,7 +387,7 @@
       [scope, scopeId, key, writerId],
     );
 
-    return [value, loaded, refresh];
+    return [value, loaded, refresh, error];
   }
 
   function useTaskTagIds(host, taskId, writerId) {
@@ -354,6 +410,42 @@
     taskTagCache[taskId] = tagIds;
   }
 
+  /** Evicts every cached task's tag ids (plugin unload, workspace switch -- D13/AC20). */
+  function clearTaskTagCache() {
+    taskTagCache = {};
+  }
+
+  // ---------------------------------------------------------------------
+  // Lifecycle: disposal of module-level (non-React) subscriptions.
+  //
+  // React-owned subscriptions (host.storage.subscribe calls made inside a
+  // useEffect, e.g. useStorageValue) already clean up correctly via their
+  // effect's own return function on unmount -- this list is only for
+  // subscriptions created directly during initialize(), outside any
+  // component lifecycle (registerTagFilter's host.store.subscribe and its
+  // workspace-scoped host.storage.subscribe), which previously had nothing
+  // to release them (D12).
+  // ---------------------------------------------------------------------
+
+  var disposables = [];
+
+  function addDisposable(dispose) {
+    disposables.push(dispose);
+  }
+
+  /** Runs and discards every pending disposable, tolerating a throw from any one of them. */
+  function drainDisposables() {
+    var toRun = disposables;
+    disposables = [];
+    toRun.forEach(function (dispose) {
+      try {
+        dispose();
+      } catch (err) {
+        logError("dispose", err);
+      }
+    });
+  }
+
   // ---------------------------------------------------------------------
   // task-card-tags: chip row
   // ---------------------------------------------------------------------
@@ -365,29 +457,34 @@
     return function TagChips(props) {
       var slotProps = props.slotProps || {};
       var taskId = slotProps.taskId;
-      var workspaceId = slotProps.workspaceId;
-      var tagIdsAndLoaded = useTaskTagIds(host, taskId, CHIPS_WRITER_ID);
+      // TaskCardTagsSlotProps.workspaceId is string | null; resolveWorkspaceId
+      // also rejects the literal string "null" (encodeURIComponent(null)),
+      // which would otherwise pass the backend's scopeId pattern and read/
+      // write a bogus "null" bucket instead of erroring.
+      var resolvedWorkspaceId = resolveWorkspaceId(host, slotProps.workspaceId);
+      var tagIdsAndLoaded = useTaskTagIds(host, resolvedWorkspaceId ? taskId : null, CHIPS_WRITER_ID);
       var tagIds = tagIdsAndLoaded[0];
       var tagIdsLoaded = tagIdsAndLoaded[1];
-      var catalogAndLoaded = useCatalog(host, workspaceId, CHIPS_WRITER_ID);
+      var catalogAndLoaded = useCatalog(host, resolvedWorkspaceId, CHIPS_WRITER_ID);
       var catalog = catalogAndLoaded[0];
       var catalogLoaded = catalogAndLoaded[1];
 
       React.useEffect(
         function () {
-          if (tagIdsLoaded) setTaskTagCache(taskId, tagIds);
+          if (resolvedWorkspaceId && tagIdsLoaded) setTaskTagCache(taskId, tagIds);
         },
-        [taskId, tagIdsLoaded, tagIds],
+        [taskId, resolvedWorkspaceId, tagIdsLoaded, tagIds],
       );
 
-      if (!tagIdsLoaded || !catalogLoaded || tagIds.length === 0) return null;
+      if (!resolvedWorkspaceId || !tagIdsLoaded || !catalogLoaded || tagIds.length === 0) return null;
 
       function handleRemove(id) {
         readModifyWriteTaskTags(host, taskId, CHIPS_WRITER_ID, function (current) {
           return removeTaskTagId(current, id);
-        }).catch(function () {
+        }).catch(function (err) {
           // Surface the failed removal on the next subscribe/refresh cycle
           // rather than throwing inside a React event handler.
+          logError("remove tag from card", err);
         });
       }
 
@@ -435,19 +532,31 @@
   // Add/pick-tag modal (opened from the kanban card menu)
   // ---------------------------------------------------------------------
 
+  /** Appends the underlying error's message, when present, in parentheses (AC4). */
+  function withDetail(message, err) {
+    return err && err.message ? message + " (" + err.message + ")" : message;
+  }
+
   function makeTagPickerModal(host, taskId, workspaceId) {
     var React = host.React;
     var jsx = host.jsx;
+    var ui = host.ui;
 
     return function TagPickerModal() {
-      var tagIdsAndLoaded = useTaskTagIds(host, taskId, PICKER_WRITER_ID);
+      var resolvedWorkspaceId = resolveWorkspaceId(host, workspaceId);
+      // No active workspace -- skip every storage call (AC6), including the
+      // task-scoped ones, rather than issuing requests the backend will
+      // reject with an "invalid scopeId" 400.
+      var tagIdsAndLoaded = useTaskTagIds(host, resolvedWorkspaceId ? taskId : null, PICKER_WRITER_ID);
       var tagIds = tagIdsAndLoaded[0];
       var tagIdsLoaded = tagIdsAndLoaded[1];
       var refreshTagIds = tagIdsAndLoaded[2];
-      var catalogAndLoaded = useCatalog(host, workspaceId, PICKER_WRITER_ID);
+      var tagIdsLoadError = tagIdsAndLoaded[3];
+      var catalogAndLoaded = useCatalog(host, resolvedWorkspaceId, PICKER_WRITER_ID);
       var catalog = catalogAndLoaded[0];
       var catalogLoaded = catalogAndLoaded[1];
       var refreshCatalog = catalogAndLoaded[2];
+      var catalogLoadError = catalogAndLoaded[3];
       var draftState = React.useState("");
       var draft = draftState[0];
       var setDraft = draftState[1];
@@ -455,13 +564,24 @@
       var error = errorState[0];
       var setError = errorState[1];
 
+      var loadError = catalogLoadError || tagIdsLoadError;
       var loaded = tagIdsLoaded && catalogLoaded;
       var name = normalizeName(draft);
       var existingMatch = name ? findTagByName(catalog, name) : null;
       // "Add" creates a brand-new catalog tag -- disabled once the typed name
       // already exists (case-insensitively), whether or not it's applied to
       // this card yet (selecting an existing tag is done via the list below).
-      var canCreate = loaded && name !== null && existingMatch === null;
+      var canCreate = !!resolvedWorkspaceId && loaded && !loadError && name !== null && existingMatch === null;
+      var displayError =
+        error || (loadError ? withDetail("Could not load tags. Please try again.", loadError) : null);
+
+      if (!resolvedWorkspaceId) {
+        return jsx(
+          "div",
+          { "data-testid": "kandev-tags-picker-modal" },
+          "Select a workspace to use tags.",
+        );
+      }
 
       function toggleTag(id) {
         setError(null);
@@ -470,38 +590,47 @@
           return applying ? addTaskTagId(current, id) : removeTaskTagId(current, id);
         })
           .then(refreshTagIds)
-          .catch(function () {
-            setError("Could not update tag. Please try again.");
+          .catch(function (err) {
+            logError("toggle tag", err);
+            setError(withDetail("Could not update tag. Please try again.", err));
           });
       }
 
       function handleCreateAndApply() {
         if (!canCreate) return;
         setError(null);
-        var nameToCreate = draft;
-        readModifyWriteCatalog(host, workspaceId, PICKER_WRITER_ID, function (currentCatalog) {
-          var result = addCatalogTag(currentCatalog, nameToCreate, null);
+        var createdTag = null;
+        readModifyWriteCatalog(host, resolvedWorkspaceId, PICKER_WRITER_ID, function (currentCatalog) {
+          var result = addCatalogTag(currentCatalog, draft, null);
           if (result === null) return currentCatalog;
+          createdTag = result.tag;
           return result.catalog;
         })
           .then(function () {
             refreshCatalog();
-            // Re-read so we apply the id the write actually produced (also
-            // covers the case another tab created the same name meanwhile).
-            return host.storage.get(CATALOG_SCOPE, workspaceId, CATALOG_KEY);
+            if (createdTag) return createdTag;
+            // Someone else created this exact (normalized) name between our
+            // read and write -- re-read and look it up by the *normalized*
+            // name, never the raw draft (the root cause of the "Could not
+            // create tag" bug: addCatalogTag stores a trimmed name, so a
+            // lookup by the untrimmed draft used to miss and this whole
+            // chain threw "tag not found after create").
+            return host.storage.get(CATALOG_SCOPE, resolvedWorkspaceId, CATALOG_KEY).then(function (entry) {
+              var latest = sanitizeCatalog(entry ? entry.value : []);
+              return findTagByName(latest, name);
+            });
           })
-          .then(function (entry) {
-            var latest = sanitizeCatalog(entry ? entry.value : []);
-            var created = findTagByName(latest, nameToCreate);
-            if (!created) throw new Error("tag not found after create");
+          .then(function (tag) {
+            if (!tag) throw new Error("tag not found after create");
             setDraft("");
             return readModifyWriteTaskTags(host, taskId, PICKER_WRITER_ID, function (current) {
-              return addTaskTagId(current, created.id);
+              return addTaskTagId(current, tag.id);
             });
           })
           .then(refreshTagIds)
-          .catch(function () {
-            setError("Could not create tag. Please try again.");
+          .catch(function (err) {
+            logError("create tag", err);
+            setError(withDetail("Could not create tag. Please try again.", err));
           });
       }
 
@@ -521,19 +650,19 @@
         jsx(
           "div",
           { style: { display: "flex", gap: "8px", alignItems: "center" } },
-          jsx("input", {
+          jsx(ui.Input, {
             "data-testid": "kandev-tags-picker-input",
             value: draft,
-            placeholder: "Search or create a tag\u2026",
+            placeholder: "Select or create a tag\u2026",
             maxLength: MAX_TAG_LENGTH,
-            style: { flex: "0 0 80%", minWidth: 0 },
+            style: { flex: 1, minWidth: 0 },
             onChange: function (e) {
               setDraft(e.target.value);
             },
             onKeyDown: handleKeyDown,
           }),
           jsx(
-            "button",
+            ui.Button,
             {
               type: "button",
               "data-testid": "kandev-tags-picker-add",
@@ -544,10 +673,10 @@
           ),
         ),
         jsx(
-          "div",
+          ui.ScrollArea,
           {
             "data-testid": "kandev-tags-picker-list",
-            style: { maxHeight: "220px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "4px" },
+            style: { maxHeight: "220px" },
           },
           !loaded
             ? "Loading\u2026"
@@ -558,218 +687,463 @@
                 .map(function (tag) {
                   var checked = tagIds.indexOf(tag.id) !== -1;
                   return jsx(
-                    "label",
+                    ui.Button,
                     {
                       key: tag.id,
+                      type: "button",
+                      variant: "ghost",
                       "data-testid": "kandev-tags-picker-option",
-                      style: { display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" },
-                    },
-                    jsx("input", {
-                      type: "checkbox",
-                      checked: checked,
-                      onChange: function () {
+                      "aria-pressed": checked,
+                      style: {
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        width: "100%",
+                      },
+                      onClick: function () {
                         toggleTag(tag.id);
                       },
-                    }),
+                    },
+                    // The tag's hex background is the only inline style this
+                    // modal needs -- everything else is host.ui structure.
                     jsx("span", { style: chipStyle(tag.color) }, tag.name),
+                    checked
+                      ? jsx("span", { "data-testid": "kandev-tags-picker-option-check", "aria-hidden": "true" }, "\u2713")
+                      : null,
                   );
                 }),
         ),
-        error ? jsx("div", { "data-testid": "kandev-tags-picker-error" }, error) : null,
+        displayError ? jsx("div", { "data-testid": "kandev-tags-picker-error" }, displayError) : null,
+      );
+    };
+  }
+
+  /**
+   * The add-tag menu item's icon -- @tabler/icons-react's IconTag geometry,
+   * inlined (host.ui exposes no icon set) at the same `mr-2 h-4 w-4`,
+   * stroke="currentColor" sizing every neighbouring item in the same menu
+   * uses (`Move to`/`Archive`/`Delete`), so it lines up pixel-for-pixel. The
+   * renderer emits `entry.icon` bare and applies no sizing of its own, so
+   * the plugin must own the className.
+   */
+  function tagIconElement(host) {
+    return host.jsx(
+      "svg",
+      {
+        className: "mr-2 h-4 w-4",
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        strokeWidth: 2,
+        strokeLinecap: "round",
+        strokeLinejoin: "round",
+        "aria-hidden": "true",
+      },
+      host.jsx("path", {
+        d: "M7.5 3h5.379a2 2 0 0 1 1.414 .586l6.121 6.121a2.121 2.121 0 0 1 0 3l-6.415 6.415a2.122 2.122 0 0 1 -3 0l-6.121 -6.121a2 2 0 0 1 -.586 -1.414v-5.379a4 4 0 0 1 4 -4z",
+      }),
+      host.jsx("path", { d: "M17.5 6.5m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" }),
+    );
+  }
+
+  // ---------------------------------------------------------------------
+  // Host capability detection (Approach 3.3's tiering)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Tier 0 (no `taskFilter`): the top-bar dropdown is manage-only (no
+   * checkboxes -- there is nowhere for a selection to gate cards). Tier 1
+   * (`taskFilter` only): today's split -- the built-in dropdown keeps its
+   * "Tags" filter section, and this dropdown stays manage-only so the two
+   * don't duplicate the same control. Tier 2 (`filterSelectionApi` also
+   * callable): this dropdown becomes the filter *and* the manager in one
+   * place -- the registration sets `hidden: true` so the built-in dropdown's
+   * section disappears. `scanStorage` is detected independently: without it
+   * the delete confirmation degrades to "removed from every card" with no
+   * exact count and no cascade.
+   */
+  function detectHostCapabilities(registry, host) {
+    return {
+      taskFilter: typeof registry.registerTaskFilter === "function",
+      filterSelectionApi: !!(
+        host.taskFilters &&
+        typeof host.taskFilters.getSelection === "function" &&
+        typeof host.taskFilters.setSelection === "function" &&
+        typeof host.taskFilters.subscribe === "function"
+      ),
+      scanStorage: !!(host.storage && typeof host.storage.listByKey === "function"),
+    };
+  }
+
+  /**
+   * Tabler's IconFilter geometry -- a funnel, matching the built-in display
+   * dropdown's own trigger convention (`IconAdjustmentsHorizontal` at
+   * `h-4 w-4` inside an outline icon-only Button) without literally copying
+   * Nextcloud Deck's tag-shaped filter icon.
+   */
+  function filterIconElement(host) {
+    return host.jsx(
+      "svg",
+      {
+        className: "h-4 w-4",
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        strokeWidth: 2,
+        strokeLinecap: "round",
+        strokeLinejoin: "round",
+        "aria-hidden": "true",
+      },
+      host.jsx("path", {
+        d: "M4 4h16v2.172a2 2 0 0 1 -.586 1.414l-4.414 4.414v7l-6 2v-8.5l-4.48 -4.928a2 2 0 0 1 -.52 -1.345v-2.227z",
+      }),
+    );
+  }
+
+  /**
+   * Every task's tag-id list currently in storage, scanned in one call
+   * instead of depending on which cards happened to mount their chips
+   * (D11/AC15). No-ops (resolves undefined) when the host predates
+   * `listByKey`.
+   */
+  function primeTaskTagCache(host) {
+    if (typeof host.storage.listByKey !== "function") return Promise.resolve();
+    return host.storage.listByKey(TASK_SCOPE, TASK_KEY, { limit: 1000 }).then(
+      function (result) {
+        result.entries.forEach(function (entry) {
+          setTaskTagCache(entry.scopeId, sanitizeTagIdList(entry.value));
+        });
+      },
+      function (err) {
+        logError("prime task tag cache", err);
+      },
+    );
+  }
+
+  /** Counts how many tasks currently carry `tagId`. Null if the host can't scan (degrades the delete copy). */
+  function countTasksWithTag(host, tagId) {
+    if (typeof host.storage.listByKey !== "function") return Promise.resolve(null);
+    return host.storage.listByKey(TASK_SCOPE, TASK_KEY, { limit: 1000 }).then(function (result) {
+      return result.entries.filter(function (entry) {
+        return sanitizeTagIdList(entry.value).indexOf(tagId) !== -1;
+      }).length;
+    });
+  }
+
+  /**
+   * Strips `tagId` from every task that carries it (D7: deleting a tag must
+   * not orphan raw-id chips on cards). Each task is updated independently so
+   * one failure doesn't block the rest; returns how many succeeded/failed.
+   */
+  function cascadeRemoveTagFromTasks(host, tagId) {
+    if (typeof host.storage.listByKey !== "function") return Promise.resolve({ succeeded: 0, failed: 0 });
+    return host.storage.listByKey(TASK_SCOPE, TASK_KEY, { limit: 1000 }).then(function (result) {
+      var affected = result.entries.filter(function (entry) {
+        return sanitizeTagIdList(entry.value).indexOf(tagId) !== -1;
+      });
+      return affected.reduce(function (chain, entry) {
+        return chain.then(function (acc) {
+          return readModifyWriteTaskTags(host, entry.scopeId, MANAGER_WRITER_ID, function (current) {
+            return removeTaskTagId(current, tagId);
+          }).then(
+            function () {
+              acc.succeeded += 1;
+              return acc;
+            },
+            function (err) {
+              logError("cascade remove tag from task " + entry.scopeId, err);
+              acc.failed += 1;
+              return acc;
+            },
+          );
+        });
+      }, Promise.resolve({ succeeded: 0, failed: 0 }));
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Delete-tag confirmation (nested modal, opened from the top-bar dropdown)
+  // ---------------------------------------------------------------------
+
+  function makeDeleteTagConfirm(host, tag, workspaceId, onDeleted) {
+    var React = host.React;
+    var jsx = host.jsx;
+    var ui = host.ui;
+
+    return function DeleteTagConfirm() {
+      var countState = React.useState(null); // null = loading, a number, or "unknown"
+      var count = countState[0];
+      var setCount = countState[1];
+      var errorState = React.useState(null);
+      var error = errorState[0];
+      var setError = errorState[1];
+      var busyState = React.useState(false);
+      var busy = busyState[0];
+      var setBusy = busyState[1];
+
+      React.useEffect(function () {
+        countTasksWithTag(host, tag.id).then(function (result) {
+          setCount(result === null ? "unknown" : result);
+        });
+      }, []);
+
+      function handleConfirm() {
+        setBusy(true);
+        cascadeRemoveTagFromTasks(host, tag.id)
+          .then(function (result) {
+            return readModifyWriteCatalog(host, workspaceId, MANAGER_WRITER_ID, function (current) {
+              return removeCatalogTag(current, tag.id);
+            }).then(function () {
+              if (result.failed > 0) {
+                setError(
+                  "Removed from " + result.succeeded + " card(s); " + result.failed + " card(s) failed to update.",
+                );
+                setBusy(false);
+                return;
+              }
+              onDeleted();
+            });
+          })
+          .catch(function (err) {
+            logError("delete tag", err);
+            setError(withDetail("Could not delete tag. Please try again.", err));
+            setBusy(false);
+          });
+      }
+
+      var description =
+        count === null
+          ? "Checking how many cards use “" + tag.name + "”…"
+          : count === "unknown"
+            ? "This tag will be removed from every card that uses it. This cannot be undone."
+            : "Remove “" +
+              tag.name +
+              "” from " +
+              count +
+              (count === 1 ? " card" : " cards") +
+              "? This cannot be undone.";
+
+      return jsx(
+        "div",
+        { "data-testid": "kandev-tags-delete-confirm", style: { display: "flex", flexDirection: "column", gap: "12px" } },
+        jsx("div", null, description),
+        error ? jsx("div", { "data-testid": "kandev-tags-delete-error" }, error) : null,
+        jsx(
+          "div",
+          { style: { display: "flex", justifyContent: "flex-end" } },
+          jsx(
+            ui.Button,
+            {
+              variant: "destructive",
+              disabled: busy || count === null,
+              "data-testid": "kandev-tags-delete-confirm-button",
+              onClick: handleConfirm,
+            },
+            "Delete",
+          ),
+        ),
       );
     };
   }
 
   // ---------------------------------------------------------------------
-  // Tag manager modal (opened from the "main-top-bar" button)
+  // main-top-bar dropdown: filter by tag (Tier 2) + inline rename/delete
   // ---------------------------------------------------------------------
 
-  function makeTagManagerModal(host, workspaceId) {
+  function makeTagsTopBarDropdown(host, capabilities) {
     var React = host.React;
     var jsx = host.jsx;
+    var ui = host.ui;
 
-    return function TagManagerModal() {
-      var catalogAndLoaded = useCatalog(host, workspaceId, MANAGER_WRITER_ID);
+    return function TagsTopBarDropdown(props) {
+      var slotProps = props.slotProps || {};
+      var resolvedWorkspaceId = resolveWorkspaceId(host, slotProps.workspaceId);
+      var catalogAndLoaded = useCatalog(host, resolvedWorkspaceId, MANAGER_WRITER_ID);
       var catalog = catalogAndLoaded[0];
       var loaded = catalogAndLoaded[1];
       var refreshCatalog = catalogAndLoaded[2];
-      var draftState = React.useState("");
-      var draft = draftState[0];
-      var setDraft = draftState[1];
+      var loadError = catalogAndLoaded[3];
+
+      // Not a lazy initializer function -- see useStorageValue's `box`
+      // comment: the plugin's minimal test React host doesn't invoke
+      // function-form useState initializers.
+      var selectedState = React.useState(
+        capabilities.filterSelectionApi ? host.taskFilters.getSelection(TAGS_FILTER_ID) : [],
+      );
+      var selected = selectedState[0];
+      var setSelected = selectedState[1];
+
+      React.useEffect(function () {
+        if (!capabilities.filterSelectionApi) return undefined;
+        return host.taskFilters.subscribe(function () {
+          setSelected(host.taskFilters.getSelection(TAGS_FILTER_ID));
+        });
+      }, []);
+
+      var renamingIdState = React.useState(null);
+      var renamingId = renamingIdState[0];
+      var setRenamingId = renamingIdState[1];
       var errorState = React.useState(null);
       var error = errorState[0];
       var setError = errorState[1];
 
-      var name = normalizeName(draft);
-      var canCreate = loaded && name !== null && findTagByName(catalog, name) === null;
+      var displayError =
+        error || (loadError ? withDetail("Could not load tags. Please try again.", loadError) : null);
 
-      function handleCreate() {
-        if (!canCreate) return;
-        setError(null);
-        readModifyWriteCatalog(host, workspaceId, MANAGER_WRITER_ID, function (current) {
-          var result = addCatalogTag(current, draft, null);
-          return result === null ? current : result.catalog;
-        })
-          .then(function () {
-            setDraft("");
-            refreshCatalog();
-          })
-          .catch(function () {
-            setError("Could not create tag. Please try again.");
-          });
+      function toggleFilter(id) {
+        if (!capabilities.filterSelectionApi) return;
+        var next =
+          selected.indexOf(id) === -1
+            ? selected.concat([id])
+            : selected.filter(function (v) {
+                return v !== id;
+              });
+        host.taskFilters.setSelection(TAGS_FILTER_ID, next);
+        setSelected(next);
       }
 
       function handleRename(id, nextName) {
-        readModifyWriteCatalog(host, workspaceId, MANAGER_WRITER_ID, function (current) {
-          return updateCatalogTag(current, id, { name: nextName });
+        setError(null);
+        var normalized = normalizeName(nextName);
+        if (normalized === null) {
+          setRenamingId(null);
+          return;
+        }
+        var changed = false;
+        readModifyWriteCatalog(host, resolvedWorkspaceId, MANAGER_WRITER_ID, function (current) {
+          var next = updateCatalogTag(current, id, { name: nextName });
+          changed = next !== current;
+          return next;
         })
-          .then(refreshCatalog)
-          .catch(function () {
-            setError("Could not rename tag. Please try again.");
+          .then(function () {
+            setRenamingId(null);
+            if (!changed) {
+              setError('A tag named "' + normalized + '" already exists.');
+              return;
+            }
+            refreshCatalog();
+          })
+          .catch(function (err) {
+            logError("rename tag", err);
+            setRenamingId(null);
+            setError(withDetail("Could not rename tag. Please try again.", err));
           });
       }
 
-      function handleRecolor(id, nextColor) {
-        readModifyWriteCatalog(host, workspaceId, MANAGER_WRITER_ID, function (current) {
-          return updateCatalogTag(current, id, { color: nextColor });
-        })
-          .then(refreshCatalog)
-          .catch(function () {
-            setError("Could not recolor tag. Please try again.");
-          });
-      }
-
-      function handleRemove(id) {
-        readModifyWriteCatalog(host, workspaceId, MANAGER_WRITER_ID, function (current) {
-          return removeCatalogTag(current, id);
-        })
-          .then(refreshCatalog)
-          .catch(function () {
-            setError("Could not remove tag. Please try again.");
-          });
-      }
-
-      return jsx(
-        "div",
-        {
-          "data-testid": "kandev-tags-manager-modal",
-          style: { display: "flex", flexDirection: "column", gap: "10px" },
-        },
-        jsx(
-          "div",
-          { style: { display: "flex", gap: "8px" } },
-          jsx("input", {
-            "data-testid": "kandev-tags-manager-input",
-            value: draft,
-            placeholder: "New tag name\u2026",
-            maxLength: MAX_TAG_LENGTH,
-            onChange: function (e) {
-              setDraft(e.target.value);
-            },
+      function openDeleteConfirm(tag) {
+        var modal = host.openModal({
+          title: "Delete tag",
+          size: "sm",
+          content: makeDeleteTagConfirm(host, tag, resolvedWorkspaceId, function () {
+            refreshCatalog();
+            modal.close();
           }),
-          jsx(
-            "button",
-            {
-              type: "button",
-              "data-testid": "kandev-tags-manager-create",
-              disabled: !canCreate,
-              onClick: handleCreate,
-            },
-            "Create",
-          ),
-        ),
-        jsx(
-          "div",
-          {
-            "data-testid": "kandev-tags-manager-list",
-            style: { maxHeight: "260px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "6px" },
-          },
-          !loaded
-            ? "Loading\u2026"
-            : catalog.map(function (tag) {
-                return jsx(
-                  "div",
-                  {
-                    key: tag.id,
-                    "data-testid": "kandev-tags-manager-row",
-                    style: { display: "flex", alignItems: "center", gap: "8px" },
-                  },
-                  jsx("input", {
-                    type: "color",
-                    "data-testid": "kandev-tags-manager-color-picker",
-                    value: tag.color,
-                    onChange: function (e) {
-                      handleRecolor(tag.id, e.target.value);
-                    },
-                  }),
-                  jsx("input", {
-                    type: "text",
-                    "data-testid": "kandev-tags-manager-hex",
-                    value: tag.color,
-                    maxLength: 7,
-                    style: { width: "70px" },
-                    onChange: function (e) {
-                      var color = normalizeColor(e.target.value);
-                      if (color) handleRecolor(tag.id, color);
-                    },
-                  }),
-                  jsx("input", {
-                    type: "text",
-                    "data-testid": "kandev-tags-manager-name",
-                    defaultValue: tag.name,
-                    maxLength: MAX_TAG_LENGTH,
-                    onBlur: function (e) {
-                      if (e.target.value !== tag.name) handleRename(tag.id, e.target.value);
-                    },
-                  }),
-                  jsx(
-                    "button",
-                    {
-                      type: "button",
-                      "data-testid": "kandev-tags-manager-remove",
-                      "aria-label": "Remove tag " + tag.name,
-                      onClick: function () {
-                        handleRemove(tag.id);
-                      },
-                    },
-                    "Remove",
-                  ),
-                );
-              }),
-        ),
-        error ? jsx("div", { "data-testid": "kandev-tags-manager-error" }, error) : null,
-      );
-    };
-  }
-
-  // ---------------------------------------------------------------------
-  // main-top-bar button
-  // ---------------------------------------------------------------------
-
-  function makeTopBarButton(host) {
-    var jsx = host.jsx;
-
-    return function TagsTopBarButton(props) {
-      var slotProps = props.slotProps || {};
-      var workspaceId = slotProps.workspaceId;
-
-      function handleClick() {
-        return host.openModal({
-          title: "Manage tags",
-          size: "md",
-          content: makeTagManagerModal(host, workspaceId),
         });
       }
 
-      return jsx(
-        "button",
+      var triggerButton = jsx(
+        ui.Button,
         {
+          variant: "outline",
+          size: "sm",
           type: "button",
-          "data-testid": "kandev-tags-manage-button",
-          "aria-label": "Manage tags",
-          onClick: handleClick,
+          className: "cursor-pointer",
+          "data-testid": "kandev-tags-topbar-button",
+          "aria-label": capabilities.filterSelectionApi ? "Filter by tag" : "Manage tags",
         },
-        "Tags",
+        filterIconElement(host),
+      );
+
+      if (!resolvedWorkspaceId) {
+        return jsx(
+          ui.DropdownMenu,
+          null,
+          jsx(ui.DropdownMenuTrigger, { asChild: true }, triggerButton),
+          jsx(
+            ui.DropdownMenuContent,
+            { align: "end" },
+            jsx("div", { className: "text-muted-foreground text-xs px-2 py-1.5" }, "Select a workspace to use tags."),
+          ),
+        );
+      }
+
+      return jsx(
+        ui.DropdownMenu,
+        null,
+        jsx(ui.DropdownMenuTrigger, { asChild: true }, triggerButton),
+        jsx(
+          ui.DropdownMenuContent,
+          { align: "end", className: "w-[260px]", "data-testid": "kandev-tags-topbar-content" },
+          jsx(
+            "div",
+            { className: "text-muted-foreground text-xs px-2 py-1.5" },
+            capabilities.filterSelectionApi ? "Filter by tag" : "Manage tags",
+          ),
+          jsx(ui.DropdownMenuSeparator, null),
+          !loaded
+            ? jsx("div", { className: "text-muted-foreground text-xs px-2 py-1.5" }, "Loading…")
+            : catalog.length === 0
+              ? jsx("div", { className: "text-muted-foreground text-xs px-2 py-1.5" }, "No tags yet.")
+              : catalog.map(function (tag) {
+                  var isChecked = selected.indexOf(tag.id) !== -1;
+                  return jsx(
+                    "div",
+                    {
+                      key: tag.id,
+                      "data-testid": "kandev-tags-topbar-row",
+                      style: { display: "flex", alignItems: "center", gap: "8px", padding: "4px 8px" },
+                    },
+                    capabilities.filterSelectionApi
+                      ? jsx(ui.Checkbox, {
+                          "data-testid": "kandev-tags-topbar-checkbox",
+                          checked: isChecked,
+                          onCheckedChange: function () {
+                            toggleFilter(tag.id);
+                          },
+                        })
+                      : null,
+                    renamingId === tag.id
+                      ? jsx(ui.Input, {
+                          autoFocus: true,
+                          "data-testid": "kandev-tags-topbar-rename-input",
+                          defaultValue: tag.name,
+                          maxLength: MAX_TAG_LENGTH,
+                          style: { height: "24px", flex: 1 },
+                          onBlur: function (e) {
+                            handleRename(tag.id, e.target.value);
+                          },
+                          onKeyDown: function (e) {
+                            if (e.key === "Enter") handleRename(tag.id, e.target.value);
+                            if (e.key === "Escape") setRenamingId(null);
+                          },
+                        })
+                      : jsx(
+                          "span",
+                          {
+                            style: Object.assign({ flex: 1, cursor: "pointer" }, chipStyle(tag.color)),
+                            "data-testid": "kandev-tags-topbar-pill",
+                            onClick: function () {
+                              setRenamingId(tag.id);
+                            },
+                          },
+                          tag.name,
+                        ),
+                    jsx(
+                      "button",
+                      {
+                        type: "button",
+                        "aria-label": "Delete tag " + tag.name,
+                        "data-testid": "kandev-tags-topbar-delete",
+                        onClick: function () {
+                          openDeleteConfirm(tag);
+                        },
+                      },
+                      "×",
+                    ),
+                  );
+                }),
+          displayError ? jsx("div", { "data-testid": "kandev-tags-topbar-error" }, displayError) : null,
+        ),
       );
     };
   }
@@ -778,8 +1152,8 @@
   // registerTaskFilter (feature-detected -- no-ops on hosts predating it)
   // ---------------------------------------------------------------------
 
-  function registerTagFilter(registry, host) {
-    if (typeof registry.registerTaskFilter !== "function") return;
+  function registerTagFilter(registry, host, capabilities) {
+    if (!capabilities.taskFilter) return;
 
     var catalog = [];
     var currentWorkspaceId = null;
@@ -790,9 +1164,16 @@
         catalog = [];
         return;
       }
-      host.storage.get(CATALOG_SCOPE, currentWorkspaceId, CATALOG_KEY).then(function (entry) {
-        catalog = sanitizeCatalog(entry ? entry.value : []);
-      });
+      host.storage.get(CATALOG_SCOPE, currentWorkspaceId, CATALOG_KEY).then(
+        function (entry) {
+          catalog = sanitizeCatalog(entry ? entry.value : []);
+        },
+        function (err) {
+          // Previously unhandled (D3) -- an unhandled rejection fired on
+          // every workspace switch that hit a storage error.
+          logError("load tag filter catalog", err);
+        },
+      );
     }
 
     // The active workspace is not necessarily known yet the moment
@@ -805,12 +1186,16 @@
     function setWorkspace(workspaceId) {
       if (workspaceId === currentWorkspaceId) return;
       currentWorkspaceId = workspaceId || null;
+      // A tag set gathered under the previous workspace must never inform
+      // this one's filter (D13/AC20).
+      clearTaskTagCache();
       if (unsubscribeStorage) {
         unsubscribeStorage();
         unsubscribeStorage = null;
       }
       if (currentWorkspaceId) {
         refreshCatalog();
+        if (capabilities.scanStorage) primeTaskTagCache(host);
         unsubscribeStorage = host.storage.subscribe(
           { scope: CATALOG_SCOPE, scopeId: currentWorkspaceId, key: CATALOG_KEY },
           refreshCatalog,
@@ -820,26 +1205,47 @@
       }
     }
 
-    function getActiveWorkspaceId() {
-      // The host's store keeps the active workspace at
-      // `state.workspaces.activeId` (apps/web/lib/state/slices/workspace/
-      // workspace-slice.ts) -- there is no top-level `activeWorkspaceId`
-      // field. Reading the wrong path silently returns `undefined` forever,
-      // which is why this must match the same shape every other workspaceId
-      // consumer in this file relies on (slotProps.workspaceId /
-      // context.workspaceId, both ultimately sourced from that slice).
-      var state = host.store.getState();
-      return (state && state.workspaces && state.workspaces.activeId) || null;
-    }
-
-    setWorkspace(getActiveWorkspaceId());
-    host.store.subscribe(function () {
-      setWorkspace(getActiveWorkspaceId());
+    // Registered once: always checks the *current* unsubscribeStorage, so a
+    // later workspace switch's subscription is released on destroy() too,
+    // without accumulating one disposable per switch (D12).
+    addDisposable(function () {
+      if (unsubscribeStorage) {
+        unsubscribeStorage();
+        unsubscribeStorage = null;
+      }
     });
 
+    setWorkspace(resolveWorkspaceId(host, null));
+    addDisposable(
+      host.store.subscribe(function () {
+        setWorkspace(resolveWorkspaceId(host, null));
+      }),
+    );
+
+    if (capabilities.scanStorage) {
+      // Keeps taskTagCache correct for cards that never mount their chips
+      // (D11/AC15), scoped wide (no scopeId) so any task's tag write --
+      // anywhere, not just the active workspace -- updates the cache.
+      addDisposable(
+        host.storage.subscribe({ scope: TASK_SCOPE, key: TASK_KEY }, function (change) {
+          host.storage.get(TASK_SCOPE, change.scopeId, TASK_KEY).then(
+            function (entry) {
+              setTaskTagCache(change.scopeId, sanitizeTagIdList(entry ? entry.value : []));
+            },
+            function (err) {
+              logError("refresh primed task tag cache entry", err);
+            },
+          );
+        }),
+      );
+    }
+
     registry.registerTaskFilter({
-      id: "tags",
+      id: TAGS_FILTER_ID,
       label: "Tags",
+      // Tier 2: this plugin's own top-bar dropdown is the filter UI, so the
+      // built-in dropdown's section would just duplicate it.
+      hidden: capabilities.filterSelectionApi,
       getOptions: function () {
         return catalog
           .map(function (tag) {
@@ -863,19 +1269,27 @@
 
   window.registerKandevPlugin("kandev-plugin-tags", {
     initialize: function (registry, host) {
+      // Idempotent: a disable->enable cycle re-runs initialize() against the
+      // cached registration without a matching destroy() call in between
+      // (see destroy's own comment), so drain any still-pending disposables
+      // from a prior initialize() first -- otherwise each cycle stacks
+      // another live host.store/host.storage listener (D12).
+      drainDisposables();
+      var capabilities = detectHostCapabilities(registry, host);
       registry.registerComponent("task-card-tags", makeTagChips(host));
-      registry.registerComponent("main-top-bar", makeTopBarButton(host));
+      registry.registerComponent("main-top-bar", makeTagsTopBarDropdown(host, capabilities));
 
       registry.registerTaskMenuAction({
         id: "add-tag",
         label: "Add tag\u2026",
+        icon: tagIconElement(host),
         // Flat, top-level item between "Move to"/"Send to workflow" and
         // "Link" -- shipped in kdlbs/kandev PR #2351.
         group: "primary",
         run: function (context) {
           return host.openModal({
             title: "Tags",
-            size: "sm",
+            size: "md",
             content: makeTagPickerModal(host, context.taskId, context.workspaceId),
           });
         },
@@ -887,7 +1301,17 @@
       // workspace is currently active, updating live if the user switches
       // workspaces. Registered unconditionally (safe no-op via feature
       // detection on hosts predating registerTaskFilter).
-      registerTagFilter(registry, host);
+      registerTagFilter(registry, host, capabilities);
+    },
+    // Called by the host's unloadPlugin on disable/uninstall (types.ts's
+    // KandevPlugin already supports this -- the plugin simply never
+    // implemented it before, which is why disabling it left its
+    // host.store/host.storage listeners running forever, each still
+    // calling host.storage.get on every workspace switch against a plugin
+    // the backend now answers 404 "plugin is not active" for (D12).
+    destroy: function () {
+      drainDisposables();
+      clearTaskTagCache();
     },
     // Exposed for ui/bundle.test.js only -- not part of the KandevPlugin
     // contract consumed by the host, which only reads `initialize`.
@@ -905,6 +1329,9 @@
       removeTaskTagId: removeTaskTagId,
       resolveTag: resolveTag,
       isConflictError: isConflictError,
+      logError: logError,
+      resolveWorkspaceId: resolveWorkspaceId,
+      setTaskTagCache: setTaskTagCache,
       readModifyWrite: readModifyWrite,
       sanitizeTagIdList: sanitizeTagIdList,
       sanitizeCatalog: sanitizeCatalog,
@@ -913,8 +1340,14 @@
       PALETTE: PALETTE,
       DEFAULT_COLOR: DEFAULT_COLOR,
       UNTAGGED_FILTER_VALUE: UNTAGGED_FILTER_VALUE,
+      TAGS_FILTER_ID: TAGS_FILTER_ID,
       makeTagPickerModal: makeTagPickerModal,
-      makeTagManagerModal: makeTagManagerModal,
+      makeTagsTopBarDropdown: makeTagsTopBarDropdown,
+      makeDeleteTagConfirm: makeDeleteTagConfirm,
+      detectHostCapabilities: detectHostCapabilities,
+      countTasksWithTag: countTasksWithTag,
+      cascadeRemoveTagFromTasks: cascadeRemoveTagFromTasks,
+      primeTaskTagCache: primeTaskTagCache,
     },
   });
 })();

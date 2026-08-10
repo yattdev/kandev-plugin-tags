@@ -7,23 +7,27 @@ user's tags and tag catalog are private and never shown to teammates.
   chips below the card's other badges. No tags, no row -- the row only
   appears once you've added at least one.
 - **Add/pick a tag**: open a card's context/dropdown menu, choose **Add
-  tag...** (a flat, top-level item between "Move to" and "Link"). A modal
-  shows a large search/create input (typing a name that doesn't exist yet
-  enables **Add**, which creates it in your tag catalog and applies it to
-  the card) plus a scrollable, multi-select list of your existing colored
-  tags -- check/uncheck to apply/remove them from this card.
-- **Manage your tags**: a **Tags** button in the app's top bar opens a
-  management modal listing your whole tag catalog, where you can create,
-  rename, recolor (hex input or a native color-picker swatch), and delete
-  tags. Deleting a tag from the catalog un-applies it everywhere (it simply
-  stops resolving, so it no longer renders).
+  tag...** (a tag icon, flat top-level item between "Move to" and "Link").
+  A medium modal shows a "Select or create a tag..." input (typing a name
+  that doesn't exist yet enables **Add**, which creates it in your tag
+  catalog and applies it to the card) above a scrollable list of your
+  existing colored tags rendered as pills -- click a row to apply/remove it
+  from this card; applied tags show a checkmark.
+- **Filter and manage from one place**: a filter-icon button in the app's
+  top bar opens a dropdown listing your whole tag catalog as
+  checkbox + colored pill rows. On a host new enough to support it
+  (`host.taskFilters`/`host.storage.listByKey`), checking a row filters the
+  board to cards carrying that tag (multi-select is OR) and the same
+  dropdown is where you rename (click a pill) or delete a tag -- delete asks
+  for confirmation stating the exact number of cards carrying the tag, and
+  removes it from both the catalog and every one of those cards. On an
+  older host without those two APIs, this dropdown is manage-only (no
+  checkboxes) and, if the host at least ships `registerTaskFilter`, the
+  board's existing built-in filter dropdown keeps its own "Tags"
+  section/Untagged option instead, so filtering is never lost, only
+  relocated depending on what the host supports.
 - **Remove a tag from a card**: click the `x` on a chip on the card itself,
-  or uncheck it in the Add tag modal.
-- **Filter the board by tags**: a **Tags** section in the board's existing
-  filter dropdown supports multi-select plus an **Untagged** option
-  (requires a host that ships `registerTaskFilter`, e.g. kdlbs/kandev
-  main after PR #2351; this plugin feature-detects the hook and silently
-  no-ops on older hosts).
+  or click it off in the Add tag modal.
 - Tag names are trimmed, capped at 32 characters, deduplicated
   case-insensitively within your catalog; each card is capped at 12 applied
   tags.
@@ -48,12 +52,17 @@ The plugin keeps two things in kandev Host per-user state (`host.storage`):
 - **applied tag ids** -- one array of catalog tag ids per (user, card) pair,
   scope `task`, key `tags`.
 
-It stores nothing else: no conversation content, no token data, no
-cross-card index (there is no bulk/board-wide read -- the board filter, once
-available, only reasons about cards whose chips have actually rendered in
-this session). Because storage is per-user, two people looking at the same
-card, or the same workspace's tag catalog, each see only their own; adding,
-removing, or even the presence of any tags is invisible to teammates.
+It stores nothing else: no conversation content, no token data. On a host
+that supports `host.storage.listByKey`, the plugin also issues a read-only
+cross-scope scan (every task's `tags` entry, capped, ordered by task id) to
+know exactly how many cards carry a tag before deleting it, to strip a
+deleted tag from every one of those cards, and to keep the board filter
+correct even for cards that haven't scrolled into view yet -- on an older
+host without that API this all degrades gracefully (no count, no cascade,
+filter only reasons about cards whose chips have actually rendered).
+Because storage is per-user, two people looking at the same card, or the
+same workspace's tag catalog, each see only their own; adding, removing, or
+even the presence of any tags is invisible to teammates.
 
 Cards tagged before this release (a plain array of tag-name strings, no
 catalog) keep working: an id that isn't found in the catalog is rendered

@@ -28,10 +28,12 @@ const bundleSource = fs.readFileSync(path.join(__dirname, "bundle.js"), "utf8");
  * itself (`__internal`, populated at the bottom of bundle.js for this
  * purpose only).
  */
-function loadBundle() {
+function loadBundle(consoleOverride) {
   let plugin = null;
   const context = {
-    console,
+    console: consoleOverride || console,
+    setTimeout,
+    clearTimeout,
     window: {
       registerKandevPlugin(id, definition) {
         assert.equal(id, "kandev-plugin-tags");
@@ -42,6 +44,12 @@ function loadBundle() {
   vm.runInNewContext(bundleSource, context, { filename: "ui/bundle.js" });
   assert.ok(plugin, "bundle registered the plugin");
   return plugin;
+}
+
+/** A console stand-in that records every `.error()` call for assertions. */
+function makeFakeConsole() {
+  const calls = { error: [] };
+  return { console: { error: (...args) => calls.error.push(args) }, calls };
 }
 
 // -----------------------------------------------------------------------
@@ -248,6 +256,43 @@ test("sanitizeCatalog drops entries missing id/name/color", () => {
 // isConflictError / readModifyWrite
 // -----------------------------------------------------------------------
 
+// -----------------------------------------------------------------------
+// logError / resolveWorkspaceId
+// -----------------------------------------------------------------------
+
+test("logError logs a single console.error with the [kandev-plugin-tags] prefix, context, and error", () => {
+  const { console: fakeConsole, calls } = makeFakeConsole();
+  const { logError } = loadBundle(fakeConsole).__internal;
+  const err = new Error("plugin storage: get failed with status 400");
+  logError("create tag", err);
+  assert.equal(calls.error.length, 1);
+  assert.equal(calls.error[0][0], "[kandev-plugin-tags] create tag");
+  assert.equal(calls.error[0][1], err);
+});
+
+test("resolveWorkspaceId trims a valid candidate", () => {
+  const { resolveWorkspaceId } = loadBundle().__internal;
+  const host = { store: { getState: () => ({ workspaces: { activeId: null } }) } };
+  assert.equal(resolveWorkspaceId(host, "  ws-1  "), "ws-1");
+});
+
+test("resolveWorkspaceId rejects empty/null/undefined/literal-null candidates and falls back to the store", () => {
+  const { resolveWorkspaceId } = loadBundle().__internal;
+  const host = { store: { getState: () => ({ workspaces: { activeId: "ws-active" } }) } };
+  assert.equal(resolveWorkspaceId(host, ""), "ws-active");
+  assert.equal(resolveWorkspaceId(host, null), "ws-active");
+  assert.equal(resolveWorkspaceId(host, undefined), "ws-active");
+  assert.equal(resolveWorkspaceId(host, "null"), "ws-active");
+  assert.equal(resolveWorkspaceId(host, "   "), "ws-active");
+});
+
+test("resolveWorkspaceId returns null when neither the candidate nor the store resolve a workspace", () => {
+  const { resolveWorkspaceId } = loadBundle().__internal;
+  const host = { store: { getState: () => ({ workspaces: { activeId: null } }) } };
+  assert.equal(resolveWorkspaceId(host, ""), null);
+  assert.equal(resolveWorkspaceId(host, "null"), null);
+});
+
 test("isConflictError recognizes PluginStorageConflictError by name", () => {
   const { isConflictError } = loadBundle().__internal;
   const err = new Error("conflict");
@@ -358,7 +403,7 @@ function makeMinimalHost(overrides) {
   return Object.assign(
     {
       React: null,
-      jsx: null,
+      jsx: (type, props, ...children) => ({ type, props, children }),
       storage: {
         get: () => Promise.resolve(undefined),
         subscribe: () => () => {},
@@ -394,6 +439,47 @@ test("bundle registers the task-card-tags slot, the main-top-bar button, and the
   assert.ok(addTagAction, "registers an add-tag menu action");
   // Flat, top-level item -- shipped in kdlbs/kandev PR #2351.
   assert.equal(addTagAction.group, "primary");
+});
+
+test("the add-tag menu action carries a tag svg icon at mr-2 h-4 w-4, matching its neighbours", () => {
+  const registered = { menuActions: [] };
+  const plugin = loadBundle();
+  const host = makeMinimalHost({ jsx: (type, props, ...children) => ({ type, props, children }) });
+  plugin.initialize(
+    {
+      registerComponent() {},
+      registerTaskMenuAction(registration) {
+        registered.menuActions.push(registration);
+      },
+    },
+    host,
+  );
+  const addTagAction = registered.menuActions.find((a) => a.id === "add-tag");
+  assert.ok(addTagAction.icon, "carries an icon");
+  assert.equal(addTagAction.icon.type, "svg");
+  assert.equal(addTagAction.icon.props.className, "mr-2 h-4 w-4");
+  assert.equal(addTagAction.icon.props.stroke, "currentColor");
+});
+
+test("the add-tag action opens the picker modal at size \"md\"", () => {
+  const plugin = loadBundle();
+  const host = makeMinimalHost({ jsx: (type, props, ...children) => ({ type, props, children }) });
+  let openModalOptions = null;
+  host.openModal = (options) => {
+    openModalOptions = options;
+  };
+  let addTagAction = null;
+  plugin.initialize(
+    {
+      registerComponent() {},
+      registerTaskMenuAction(registration) {
+        addTagAction = registration;
+      },
+    },
+    host,
+  );
+  addTagAction.run({ taskId: "task-1", workspaceId: "ws-1" });
+  assert.equal(openModalOptions.size, "md");
 });
 
 test("bundle registers a Tags task filter when the host supports registerTaskFilter", () => {
@@ -509,6 +595,178 @@ test("registerTaskFilter registers even when activeWorkspaceId isn't set yet, an
   assert.ok(optionValues.includes("__untagged__"));
 });
 
+// -----------------------------------------------------------------------
+// Lifecycle: disposal on destroy(), idempotent initialize(), cache eviction
+// -----------------------------------------------------------------------
+
+/** A host whose store/storage subscribe track how many listeners are currently live. */
+function makeListenerCountingHost() {
+  var liveStore = 0;
+  var liveStorage = 0;
+  var activeId = "ws-1";
+  return {
+    React: null,
+    jsx: (type, props, ...children) => ({ type, props, children }),
+    store: {
+      getState: () => ({ workspaces: { activeId } }),
+      subscribe: () => {
+        liveStore += 1;
+        var unsubscribed = false;
+        return () => {
+          if (unsubscribed) return;
+          unsubscribed = true;
+          liveStore -= 1;
+        };
+      },
+    },
+    storage: {
+      get: () => Promise.resolve(undefined),
+      subscribe: () => {
+        liveStorage += 1;
+        var unsubscribed = false;
+        return () => {
+          if (unsubscribed) return;
+          unsubscribed = true;
+          liveStorage -= 1;
+        };
+      },
+    },
+    setActiveWorkspace(id) {
+      activeId = id;
+    },
+    counts: () => ({ store: liveStore, storage: liveStorage }),
+  };
+}
+
+function makeFullRegistry() {
+  return {
+    registerComponent() {},
+    registerTaskMenuAction() {},
+    registerTaskFilter() {},
+  };
+}
+
+test("destroy() unsubscribes every store/storage listener registered during initialize", () => {
+  const plugin = loadBundle();
+  const host = makeListenerCountingHost();
+  plugin.initialize(makeFullRegistry(), host);
+  const afterInit = host.counts();
+  assert.ok(afterInit.store >= 1 && afterInit.storage >= 1, "initialize registers live listeners");
+  plugin.destroy();
+  assert.deepEqual(host.counts(), { store: 0, storage: 0 }, "destroy leaves zero live listeners");
+});
+
+test("repeated initialize -> destroy cycles leave exactly zero live listeners, not N", () => {
+  const plugin = loadBundle();
+  const host = makeListenerCountingHost();
+  for (let i = 0; i < 3; i++) {
+    plugin.initialize(makeFullRegistry(), host);
+    plugin.destroy();
+  }
+  assert.deepEqual(host.counts(), { store: 0, storage: 0 });
+});
+
+test("initialize twice without an intervening destroy still leaves one set of listeners, not two", () => {
+  const plugin = loadBundle();
+  const host = makeListenerCountingHost();
+  plugin.initialize(makeFullRegistry(), host);
+  const afterFirst = host.counts();
+  plugin.initialize(makeFullRegistry(), host);
+  assert.deepEqual(host.counts(), afterFirst, "re-initializing drains stale disposables before registering new ones");
+});
+
+test("after destroy, a store-state change triggers zero further storage.get calls", () => {
+  const plugin = loadBundle();
+  const listeners = new Set();
+  let getCalls = 0;
+  let activeId = "ws-1";
+  const host = {
+    React: null,
+    jsx: (type, props, ...children) => ({ type, props, children }),
+    store: {
+      getState: () => ({ workspaces: { activeId } }),
+      subscribe: (fn) => {
+        listeners.add(fn);
+        return () => listeners.delete(fn);
+      },
+    },
+    storage: {
+      get: () => {
+        getCalls += 1;
+        return Promise.resolve(undefined);
+      },
+      subscribe: () => () => {},
+    },
+  };
+  plugin.initialize(makeFullRegistry(), host);
+  const callsAfterInit = getCalls;
+  plugin.destroy();
+  activeId = "ws-2";
+  listeners.forEach((fn) => fn());
+  assert.equal(getCalls, callsAfterInit, "destroy stops the plugin from reacting to further store changes");
+});
+
+test("taskTagCache is cleared on destroy so a stale tag set doesn't leak into a fresh initialize", () => {
+  const plugin = loadBundle();
+  const { setTaskTagCache } = plugin.__internal;
+  const host = makeListenerCountingHost();
+  let filterRegistration;
+  plugin.initialize(
+    Object.assign(makeFullRegistry(), {
+      registerTaskFilter(reg) {
+        filterRegistration = reg;
+      },
+    }),
+    host,
+  );
+  setTaskTagCache("task-1", ["t1"]);
+  assert.equal(filterRegistration.matches({ taskId: "task-1" }, ["t1"]), true, "cache populated");
+
+  plugin.destroy();
+  assert.equal(filterRegistration.matches({ taskId: "task-1" }, ["t1"]), false, "cache cleared on destroy");
+});
+
+test("taskTagCache is cleared on workspace switch so one workspace's tags don't inform another's filter", () => {
+  const plugin = loadBundle();
+  const { setTaskTagCache } = plugin.__internal;
+  let activeWorkspaceId = "ws-1";
+  const listeners = new Set();
+  const host = {
+    React: null,
+    jsx: (type, props, ...children) => ({ type, props, children }),
+    store: {
+      getState: () => ({ workspaces: { activeId: activeWorkspaceId } }),
+      subscribe: (fn) => {
+        listeners.add(fn);
+        return () => listeners.delete(fn);
+      },
+    },
+    storage: {
+      get: () => Promise.resolve(undefined),
+      subscribe: () => () => {},
+    },
+  };
+  let filterRegistration;
+  plugin.initialize(
+    Object.assign(makeFullRegistry(), {
+      registerTaskFilter(reg) {
+        filterRegistration = reg;
+      },
+    }),
+    host,
+  );
+  setTaskTagCache("task-1", ["t1"]);
+  assert.equal(filterRegistration.matches({ taskId: "task-1" }, ["t1"]), true);
+
+  activeWorkspaceId = "ws-2";
+  listeners.forEach((fn) => fn());
+  assert.equal(
+    filterRegistration.matches({ taskId: "task-1" }, ["t1"]),
+    false,
+    "cache cleared when the active workspace changes",
+  );
+});
+
 /**
  * Minimal React-hooks-and-jsx stand-in sufficient to mount a plugin
  * component: useState/useEffect run against a single persistent state
@@ -546,9 +804,24 @@ function makeFakeReactHost() {
   };
   const jsx = (type, props, ...children) => ({ type, props, children });
 
+  // Sentinel "component types" for host.ui -- the fake jsx() above just
+  // records `type` verbatim, so a plain string tag is directly assertable
+  // (`tree.type === "ui-Button"`) without needing real @kandev/ui.
+  const ui = {
+    Button: "ui-Button",
+    Input: "ui-Input",
+    Checkbox: "ui-Checkbox",
+    ScrollArea: "ui-ScrollArea",
+    DropdownMenu: "ui-DropdownMenu",
+    DropdownMenuTrigger: "ui-DropdownMenuTrigger",
+    DropdownMenuContent: "ui-DropdownMenuContent",
+    DropdownMenuSeparator: "ui-DropdownMenuSeparator",
+  };
+
   return {
     React,
     jsx,
+    ui,
     mount(Component, props) {
       renderComponent = () => Component(props);
       rerender();
@@ -562,6 +835,35 @@ async function flush() {
   await Promise.resolve();
   await Promise.resolve();
 }
+
+test("useStorageValue distinguishes a failed load from an empty catalog, logging the failure", async () => {
+  const { console: fakeConsole, calls } = makeFakeConsole();
+  const plugin = loadBundle(fakeConsole);
+  const { makeTagPickerModal } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "workspace") {
+        return Promise.reject(new Error("plugin storage: get failed with status 400"));
+      }
+      return Promise.resolve(undefined);
+    },
+    subscribe: () => () => {},
+  };
+
+  const TagPickerModal = makeTagPickerModal(fakeHost, "task-1", "ws-1");
+  const getTree = fakeHost.mount(TagPickerModal, {});
+  await flush();
+
+  const tree = getTree();
+  const errorNode = tree.children.find((c) => c && c.props && c.props["data-testid"] === "kandev-tags-picker-error");
+  assert.ok(errorNode, "renders an explicit error state instead of an empty list");
+  const [, addButtonEl] = tree.children[0].children;
+  assert.equal(addButtonEl.props.disabled, true, "create control is disabled while the catalog failed to load");
+  assert.ok(calls.error.length >= 1, "the failure is logged, not swallowed");
+  assert.match(calls.error[0][0], /^\[kandev-plugin-tags\]/);
+});
 
 test("TagChips resolves catalog colors and stops propagation on remove", async () => {
   const plugin = loadBundle();
@@ -728,41 +1030,346 @@ test("TagPickerModal's own create-and-apply refreshes its own list without any s
   const listChildren = tree.children[1].children[0];
   assert.ok(Array.isArray(listChildren), "catalog list rendered (not the loading placeholder)");
   const option = listChildren.find(function (o) {
-    return o.children[1].children[0] === "urgent";
+    return o.children[0].children[0] === "urgent";
   });
   assert.ok(option, "the newly created tag appears in this modal's own list, with no subscribe notification firing");
-  assert.equal(option.children[0].props.checked, true, "the newly created tag is applied to the task immediately");
+  assert.equal(
+    option.props["aria-pressed"],
+    true,
+    "the newly created tag is applied to the task immediately",
+  );
 });
 
-test("TagManagerModal's own create refreshes its own list without any subscribe notification", async () => {
+test("regression: creating \" urgent \" (surrounding whitespace) succeeds with no error and applies the trimmed tag", async () => {
   const plugin = loadBundle();
-  const { makeTagManagerModal } = plugin.__internal;
+  const { makeTagPickerModal } = plugin.__internal;
   const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
   fakeHost.storage = makeEchoSuppressingStorage();
 
-  const TagManagerModal = makeTagManagerModal(fakeHost, "ws-1");
-  const getTree = fakeHost.mount(TagManagerModal, {});
+  const TagPickerModal = makeTagPickerModal(fakeHost, "task-1", "ws-1");
+  const getTree = fakeHost.mount(TagPickerModal, {});
   await flush();
 
   let tree = getTree();
   const [inputEl] = tree.children[0].children;
-  inputEl.props.onChange({ target: { value: "blocked" } });
+  inputEl.props.onChange({ target: { value: "  urgent  " } });
   await flush();
 
   tree = getTree();
-  const [, createButtonEl] = tree.children[0].children;
-  assert.equal(createButtonEl.props.disabled, false, "Create enables once a new name is typed");
-  createButtonEl.props.onClick();
+  const [, addButtonEl] = tree.children[0].children;
+  assert.equal(addButtonEl.props.disabled, false, "Add enables once a valid (untrimmed) name is typed");
+  addButtonEl.props.onClick();
+  await flush();
+  await flush();
+  await flush();
   await flush();
   await flush();
 
   tree = getTree();
-  const rows = tree.children[1].children[0];
-  assert.ok(Array.isArray(rows), "manager list rendered (not the loading placeholder)");
-  assert.ok(
-    rows.some(function (row) {
-      return row.children[2].props.defaultValue === "blocked";
-    }),
-    "the newly created tag appears in this modal's own list, with no subscribe notification firing",
+  const errorNode = tree.children.find((c) => c && c.props && c.props["data-testid"] === "kandev-tags-picker-error");
+  assert.equal(errorNode, undefined, "no error is shown");
+  const listChildren = tree.children[1].children[0];
+  const option = listChildren.find((o) => o.children[0].children[0] === "urgent");
+  assert.ok(option, "the tag was created trimmed to \"urgent\"");
+  assert.equal(option.props["aria-pressed"], true, "the trimmed tag is applied to the task");
+});
+
+test("with no active workspace, the picker modal renders a prompt and makes zero storage calls", async () => {
+  const plugin = loadBundle();
+  const { makeTagPickerModal } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: null } }) };
+  let storageCalls = 0;
+  fakeHost.storage = {
+    get() {
+      storageCalls += 1;
+      return Promise.resolve(undefined);
+    },
+    subscribe: () => {
+      storageCalls += 1;
+      return () => {};
+    },
+  };
+
+  const TagPickerModal = makeTagPickerModal(fakeHost, "task-1", "");
+  const getTree = fakeHost.mount(TagPickerModal, {});
+  await flush();
+
+  const tree = getTree();
+  assert.equal(tree.children[0], "Select a workspace to use tags.");
+  assert.equal(storageCalls, 0, "zero storage calls are made with no active workspace");
+});
+
+
+// -----------------------------------------------------------------------
+// detectHostCapabilities / top-bar filter+manage dropdown (Phase 3)
+// -----------------------------------------------------------------------
+
+function makeFakeTaskFilters(initial) {
+  let selection = initial || [];
+  const listeners = new Set();
+  return {
+    getSelection: () => selection,
+    setSelection: (id, values) => {
+      selection = values;
+      listeners.forEach((listener) => listener());
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+}
+
+test("detectHostCapabilities detects each tier independently", () => {
+  const { detectHostCapabilities } = loadBundle().__internal;
+
+  assertStructural.deepEqual(detectHostCapabilities({}, {}), {
+    taskFilter: false,
+    filterSelectionApi: false,
+    scanStorage: false,
+  });
+
+  const tier1 = detectHostCapabilities({ registerTaskFilter: () => {} }, { storage: {} });
+  assertStructural.deepEqual(tier1, { taskFilter: true, filterSelectionApi: false, scanStorage: false });
+
+  const tier2 = detectHostCapabilities(
+    { registerTaskFilter: () => {} },
+    {
+      taskFilters: { getSelection: () => [], setSelection: () => {}, subscribe: () => () => {} },
+      storage: { listByKey: () => Promise.resolve({ entries: [], truncated: false }) },
+    },
   );
+  assertStructural.deepEqual(tier2, { taskFilter: true, filterSelectionApi: true, scanStorage: true });
+});
+
+test("TagsTopBarDropdown (Tier 2): renders a checkbox+pill+delete row per tag and toggling sets host.taskFilters", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [{ id: "t1", name: "urgent", color: "#ef4444" }]);
+  fakeHost.taskFilters = makeFakeTaskFilters();
+
+  const capabilities = { taskFilter: true, filterSelectionApi: true, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  let tree = getTree();
+  const content = tree.children[1];
+  assert.equal(content.type, fakeHost.ui.DropdownMenuContent);
+  const rows = content.children[2];
+  assert.ok(Array.isArray(rows), "catalog rendered as rows, not a loading/empty placeholder");
+  const row = rows[0];
+  const checkbox = row.children[0];
+  assert.equal(checkbox.type, fakeHost.ui.Checkbox);
+  assert.equal(checkbox.props.checked, false);
+
+  checkbox.props.onCheckedChange();
+  await flush();
+  assert.deepEqual(fakeHost.taskFilters.getSelection(), ["t1"], "checking a row sets the shared filter selection");
+
+  tree = getTree();
+  const rowsAfter = tree.children[1].children[2];
+  assert.equal(rowsAfter[0].children[0].props.checked, true, "the row reflects the now-checked state");
+});
+
+test("TagsTopBarDropdown (Tier 0/1): renders no checkboxes -- manage-only", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [{ id: "t1", name: "urgent", color: "#ef4444" }]);
+
+  const capabilities = { taskFilter: true, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  const tree = getTree();
+  const rows = tree.children[1].children[2];
+  const row = rows[0];
+  assert.equal(row.children[0], null, "no checkbox rendered without host.taskFilters");
+});
+
+test("TagsTopBarDropdown: clicking a tag's pill enters rename mode; committing renames it, clashing shows an error", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [
+    { id: "t1", name: "bug", color: "#ef4444" },
+    { id: "t2", name: "urgent", color: "#3b82f6" },
+  ]);
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  let tree = getTree();
+  let rows = tree.children[1].children[2];
+  let bugRow = rows.find((r) => r.children[1].props && r.children[1].props["data-testid"] === "kandev-tags-topbar-pill" && r.children[1].children[0] === "bug");
+  bugRow.children[1].props.onClick();
+  await flush();
+
+  tree = getTree();
+  rows = tree.children[1].children[2];
+  bugRow = rows.find((r) => r.children[1].props && r.children[1].props["data-testid"] === "kandev-tags-topbar-rename-input");
+  assert.ok(bugRow, "clicking the pill swaps it for a rename input");
+
+  bugRow.children[1].props.onBlur({ target: { value: "urgent" } });
+  await flush();
+
+  tree = getTree();
+  const errorNode = tree.children[1].children.find(
+    (c) => c && c.props && c.props["data-testid"] === "kandev-tags-topbar-error",
+  );
+  assert.ok(errorNode, "renaming to a clashing name surfaces an error");
+});
+
+test("countTasksWithTag counts across task scopeIds via listByKey, ignoring non-matching tasks", async () => {
+  const { countTasksWithTag } = loadBundle().__internal;
+  const host = {
+    storage: {
+      listByKey: () =>
+        Promise.resolve({
+          entries: [
+            { scopeId: "task-1", value: ["t1"], updatedAt: "t0" },
+            { scopeId: "task-2", value: ["t2"], updatedAt: "t0" },
+            { scopeId: "task-3", value: ["t1", "t2"], updatedAt: "t0" },
+          ],
+          truncated: false,
+        }),
+    },
+  };
+  assert.equal(await countTasksWithTag(host, "t1"), 2);
+});
+
+test("countTasksWithTag returns null when the host can't scan (degrades the delete copy)", async () => {
+  const { countTasksWithTag } = loadBundle().__internal;
+  assert.equal(await countTasksWithTag({ storage: {} }, "t1"), null);
+});
+
+test("cascadeRemoveTagFromTasks strips the tag from every affected task and reports partial failure", async () => {
+  const { cascadeRemoveTagFromTasks } = loadBundle().__internal;
+  const written = {};
+  const host = {
+    storage: {
+      listByKey: () =>
+        Promise.resolve({
+          entries: [
+            { scopeId: "task-1", value: ["t1", "t2"], updatedAt: "t0" },
+            { scopeId: "task-2", value: ["t1"], updatedAt: "t0" },
+          ],
+          truncated: false,
+        }),
+      get(scope, scopeId) {
+        return Promise.resolve({ value: scopeId === "task-1" ? ["t1", "t2"] : ["t1"], updatedAt: "t0" });
+      },
+      set(scope, scopeId, key, value) {
+        if (scopeId === "task-2") return Promise.reject(new Error("boom"));
+        written[scopeId] = value;
+        return Promise.resolve({ updatedAt: "t1" });
+      },
+    },
+  };
+  const result = await cascadeRemoveTagFromTasks(host, "t1");
+  assert.equal(result.succeeded, 1);
+  assert.equal(result.failed, 1);
+  assertStructural.deepEqual(written["task-1"], ["t2"]);
+});
+
+test("primeTaskTagCache populates taskTagCache from a single listByKey scan", async () => {
+  const plugin = loadBundle();
+  const { primeTaskTagCache } = plugin.__internal;
+
+  // initialize() first, as it would run in production -- its own
+  // setWorkspace(null -> "ws-1") transition clears taskTagCache (D13), so
+  // priming has to happen (and be asserted) after that settles, not before.
+  let filterRegistration = null;
+  const registryHost = makeListenerCountingHost();
+  plugin.initialize(
+    Object.assign(makeFullRegistry(), {
+      registerTaskFilter(reg) {
+        filterRegistration = reg;
+      },
+    }),
+    registryHost,
+  );
+
+  await primeTaskTagCache({
+    storage: {
+      listByKey: () =>
+        Promise.resolve({
+          entries: [{ scopeId: "task-unseen", value: ["t1"], updatedAt: "t0" }],
+          truncated: false,
+        }),
+    },
+  });
+
+  assert.equal(
+    filterRegistration.matches({ taskId: "task-unseen" }, ["t1"]),
+    true,
+    "a task that never mounted its chips is still matched, once primed from the scan",
+  );
+});
+
+test("registerTaskFilter hides the built-in dropdown section only when filterSelectionApi is available (Tier 2)", () => {
+  const plugin = loadBundle();
+  const hostTier1 = makeListenerCountingHost();
+  let regTier1 = null;
+  plugin.initialize(
+    Object.assign(makeFullRegistry(), {
+      registerTaskFilter(reg) {
+        regTier1 = reg;
+      },
+    }),
+    hostTier1,
+  );
+  assert.equal(regTier1.hidden, false, "Tier 1 (no host.taskFilters): built-in section stays visible");
+
+  const hostTier2 = makeListenerCountingHost();
+  hostTier2.taskFilters = makeFakeTaskFilters();
+  hostTier2.storage.listByKey = () => Promise.resolve({ entries: [], truncated: false });
+  let regTier2 = null;
+  plugin.initialize(
+    Object.assign(makeFullRegistry(), {
+      registerTaskFilter(reg) {
+        regTier2 = reg;
+      },
+    }),
+    hostTier2,
+  );
+  assert.equal(regTier2.hidden, true, "Tier 2: built-in section hidden, this plugin's own dropdown is the filter UI");
+});
+
+test("TagPickerModal is built from host.ui primitives (Input, Button, ScrollArea)", async () => {
+  const plugin = loadBundle();
+  const { makeTagPickerModal } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [{ id: "t1", name: "bug", color: "#ef4444" }]);
+
+  const TagPickerModal = makeTagPickerModal(fakeHost, "task-1", "ws-1");
+  const getTree = fakeHost.mount(TagPickerModal, {});
+  await flush();
+
+  const tree = getTree();
+  const [inputEl, addButtonEl] = tree.children[0].children;
+  assert.equal(inputEl.type, fakeHost.ui.Input);
+  assert.equal(addButtonEl.type, fakeHost.ui.Button);
+  const list = tree.children[1];
+  assert.equal(list.type, fakeHost.ui.ScrollArea);
+  const [option] = list.children[0];
+  assert.equal(option.type, fakeHost.ui.Button, "each row is host.ui.Button, toggled by clicking anywhere on it");
+  const pill = option.children[0];
+  assert.deepEqual(Object.keys(pill.props.style), Object.keys(pill.props.style), "pill style exists");
+  assert.equal(pill.props.style.background, "#ef4444", "the only inline style is the tag's dynamic hex background");
 });
