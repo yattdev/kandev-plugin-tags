@@ -1161,7 +1161,7 @@ test("TagsTopBarDropdown (Tier 2): renders a checkbox+pill+delete row per tag an
   let tree = getTree();
   const content = tree.children[1];
   assert.equal(content.type, fakeHost.ui.DropdownMenuContent);
-  const rows = content.children[2];
+  const rows = content.children[4];
   assert.ok(Array.isArray(rows), "catalog rendered as rows, not a loading/empty placeholder");
   const row = rows[0];
   const checkbox = row.children[1];
@@ -1173,7 +1173,7 @@ test("TagsTopBarDropdown (Tier 2): renders a checkbox+pill+delete row per tag an
   assert.deepEqual(fakeHost.taskFilters.getSelection(), ["t1"], "checking a row sets the shared filter selection");
 
   tree = getTree();
-  const rowsAfter = tree.children[1].children[2];
+  const rowsAfter = tree.children[1].children[4];
   assert.equal(rowsAfter[0].children[1].props.checked, true, "the row reflects the now-checked state");
 });
 
@@ -1191,7 +1191,7 @@ test("TagsTopBarDropdown (Tier 0/1): renders no checkboxes -- manage-only", asyn
   await flush();
 
   const tree = getTree();
-  const rows = tree.children[1].children[2];
+  const rows = tree.children[1].children[4];
   const row = rows[0];
   assert.equal(row.children[1], null, "no checkbox rendered without host.taskFilters");
 });
@@ -1213,13 +1213,13 @@ test("TagsTopBarDropdown: clicking a tag's pill enters rename mode; committing r
   await flush();
 
   let tree = getTree();
-  let rows = tree.children[1].children[2];
+  let rows = tree.children[1].children[4];
   let bugRow = rows.find((r) => r.children[2].props && r.children[2].props["data-testid"] === "kandev-tags-topbar-pill" && r.children[2].children[0] === "bug");
   bugRow.children[2].props.onClick();
   await flush();
 
   tree = getTree();
-  rows = tree.children[1].children[2];
+  rows = tree.children[1].children[4];
   bugRow = rows.find((r) => r.children[2].props && r.children[2].props["data-testid"] === "kandev-tags-topbar-rename-input");
   assert.ok(bugRow, "clicking the pill swaps it for a rename input");
 
@@ -1247,7 +1247,7 @@ test("TagsTopBarDropdown: each row has a color swatch that recolors the tag on b
   await flush();
 
   let tree = getTree();
-  let rows = tree.children[1].children[2];
+  let rows = tree.children[1].children[4];
   const colorSwatch = rows[0].children[0];
   assert.equal(colorSwatch.props.type, "color");
   assert.equal(colorSwatch.props.defaultValue, "#ef4444");
@@ -1257,8 +1257,66 @@ test("TagsTopBarDropdown: each row has a color swatch that recolors the tag on b
   await flush();
 
   tree = getTree();
-  rows = tree.children[1].children[2];
+  rows = tree.children[1].children[4];
   assert.equal(rows[0].children[0].props.defaultValue, "#00ff00", "the catalog reflects the new color");
+});
+
+test("regression: TagsTopBarDropdown has its own Create input, independent of the Add-tags modal (AC2)", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  let tree = getTree();
+  let content = tree.children[1];
+  const [inputEl, createButtonEl] = content.children[2].children;
+  assert.equal(inputEl.props["data-testid"], "kandev-tags-topbar-create-input");
+  assert.equal(createButtonEl.props.disabled, true, "Create starts disabled with an empty draft");
+
+  inputEl.props.onChange({ target: { value: "urgent" } });
+  await flush();
+  content = getTree().children[1];
+  const [, createButtonAfterTyping] = content.children[2].children;
+  assert.equal(createButtonAfterTyping.props.disabled, false, "Create enables once a valid name is typed");
+
+  createButtonAfterTyping.props.onClick();
+  await flush();
+  await flush();
+
+  tree = getTree();
+  const rows = tree.children[1].children[4];
+  assert.ok(Array.isArray(rows), "catalog list rendered (not the loading/empty placeholder)");
+  const created = rows.find((r) => r.children[2].children[0] === "urgent");
+  assert.ok(created, "the tag created via the top-bar dropdown's own Create input appears in its list");
+});
+
+test("regression: TagsTopBarDropdown's Create trims whitespace and rejects duplicates (AC3, AC7)", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [{ id: "t1", name: "urgent", color: "#ef4444" }]);
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  let content = getTree().children[1];
+  let [inputEl] = content.children[2].children;
+  inputEl.props.onChange({ target: { value: "  urgent  " } });
+  await flush();
+
+  content = getTree().children[1];
+  const [, createButtonEl] = content.children[2].children;
+  assert.equal(createButtonEl.props.disabled, true, "Create is disabled for a name that already exists (post-trim)");
 });
 
 test("countTasksWithTag counts across task scopeIds via listByKey, ignoring non-matching tasks", async () => {

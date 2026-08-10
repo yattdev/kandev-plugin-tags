@@ -998,9 +998,46 @@
       var errorState = React.useState(null);
       var error = errorState[0];
       var setError = errorState[1];
+      var draftState = React.useState("");
+      var draft = draftState[0];
+      var setDraft = draftState[1];
 
       var displayError =
         error || (loadError ? withDetail("Could not load tags. Please try again.", loadError) : null);
+      var draftName = normalizeName(draft);
+      var canCreate =
+        !!resolvedWorkspaceId &&
+        loaded &&
+        !loadError &&
+        draftName !== null &&
+        findTagByName(catalog, draftName) === null;
+
+      function handleCreate() {
+        if (!canCreate) return;
+        setError(null);
+        var createdTag = null;
+        readModifyWriteCatalog(host, resolvedWorkspaceId, MANAGER_WRITER_ID, function (current) {
+          var result = addCatalogTag(current, draft, null);
+          if (result === null) return current;
+          createdTag = result.tag;
+          return result.catalog;
+        })
+          .then(function () {
+            if (!createdTag) {
+              // Another tab created this exact name between our disabled-
+              // state check and this write (D6) -- surface it, don't clear
+              // the input and pretend it succeeded.
+              setError('A tag named "' + draftName + '" already exists.');
+              return;
+            }
+            setDraft("");
+            refreshCatalog();
+          })
+          .catch(function (err) {
+            logError("create tag", err);
+            setError(withDetail("Could not create tag. Please try again.", err));
+          });
+      }
 
       function toggleFilter(id) {
         if (!capabilities.filterSelectionApi) return;
@@ -1102,6 +1139,35 @@
             "div",
             { className: "text-muted-foreground text-xs px-2 py-1.5" },
             capabilities.filterSelectionApi ? "Filter by tag" : "Manage tags",
+          ),
+          jsx(ui.DropdownMenuSeparator, null),
+          jsx(
+            "div",
+            { style: { display: "flex", gap: "6px", padding: "4px 8px" } },
+            jsx(ui.Input, {
+              "data-testid": "kandev-tags-topbar-create-input",
+              value: draft,
+              placeholder: "New tag name…",
+              maxLength: MAX_TAG_LENGTH,
+              style: { flex: 1, height: "28px" },
+              onChange: function (e) {
+                setDraft(e.target.value);
+              },
+              onKeyDown: function (e) {
+                if (e.key === "Enter") handleCreate();
+              },
+            }),
+            jsx(
+              ui.Button,
+              {
+                type: "button",
+                size: "sm",
+                "data-testid": "kandev-tags-topbar-create",
+                disabled: !canCreate,
+                onClick: handleCreate,
+              },
+              "Create",
+            ),
           ),
           jsx(ui.DropdownMenuSeparator, null),
           !loaded
