@@ -47,7 +47,11 @@
  * `host.storage.subscribe` per entry -- so N simultaneously-mounted chip
  * rows/dropdowns for the same workspace/task issue exactly one read and one
  * subscription between them, not N. `useCatalog`/`useTaskTagIds` (the hooks
- * every surface renders through) are thin wrappers over these stores.
+ * every surface renders through) are thin wrappers over these stores. The
+ * coalescing never swallows an invalidation: a request arriving while a
+ * `get` is already in flight marks the store dirty and is re-issued on
+ * settle (see fetchStore), and every teardown of these stores' subscriptions
+ * resets the stores with them (see resetSharedStores).
  *
  * Every write races against a concurrent write from another tab/surface, so
  * all mutations read-modify-write against the entry's `updatedAt` via
@@ -422,7 +426,18 @@
   var taskTagWideUnsubscribe = null;
 
   function makeStore() {
-    return { value: [], loaded: false, error: null, listeners: [], inFlight: null, unsubscribe: null };
+    return {
+      value: [],
+      loaded: false,
+      error: null,
+      listeners: [],
+      inFlight: null,
+      // Set when a fetch is requested while one is already in flight -- see
+      // fetchStore, which re-issues on settle so a change notification
+      // arriving mid-flight is never swallowed by the coalescing.
+      dirty: false,
+      unsubscribe: null,
+    };
   }
 
   function notifyStoreListeners(store) {
@@ -455,27 +470,65 @@
     }
   }
 
-  /** Coalesced fetch: a caller arriving while one is already in flight joins it instead of issuing another `get`. */
-  function fetchCatalog(host, workspaceId) {
-    var store = getCatalogStore(workspaceId);
-    if (store.inFlight) return store.inFlight;
-    store.inFlight = host.storage.get(CATALOG_SCOPE, workspaceId, CATALOG_KEY).then(
+  /**
+   * Coalesced fetch shared by fetchCatalog/fetchTaskTags: a caller arriving
+   * while a `get` is already in flight joins that promise instead of issuing
+   * another one.
+   *
+   * Coalescing two concurrent *readers* is all that needs -- but a caller can
+   * just as well be an *invalidation* (a host.storage.subscribe notification
+   * for a write that landed after the in-flight `get` was issued), whose
+   * response is therefore stale by the time it arrives. Plain coalescing
+   * would drop that notification and leave the store holding pre-write data
+   * until some later unrelated change. So a request that arrives mid-flight
+   * marks the store `dirty`, and settling with `dirty` set re-issues the
+   * fetch -- last write always wins, the same guarantee the per-component
+   * `generation` counter this store layer replaced used to give.
+   */
+  function fetchStore(store, issueGet, sanitize, label, refetch) {
+    if (store.inFlight) {
+      store.dirty = true;
+      return store.inFlight;
+    }
+    store.dirty = false;
+
+    function settle(apply) {
+      store.inFlight = null;
+      apply();
+      store.loaded = true;
+      notifyStoreListeners(store);
+      if (store.dirty) refetch();
+    }
+
+    store.inFlight = issueGet().then(
       function (entry) {
-        store.inFlight = null;
-        store.value = sanitizeCatalog(entry ? entry.value : undefined);
-        store.loaded = true;
-        store.error = null;
-        notifyStoreListeners(store);
+        settle(function () {
+          store.value = sanitize(entry ? entry.value : undefined);
+          store.error = null;
+        });
       },
       function (err) {
-        store.inFlight = null;
-        logError("load " + CATALOG_SCOPE + "/" + CATALOG_KEY, err);
-        store.loaded = true;
-        store.error = err;
-        notifyStoreListeners(store);
+        settle(function () {
+          logError("load " + label, err);
+          store.error = err;
+        });
       },
     );
     return store.inFlight;
+  }
+
+  function fetchCatalog(host, workspaceId) {
+    return fetchStore(
+      getCatalogStore(workspaceId),
+      function () {
+        return host.storage.get(CATALOG_SCOPE, workspaceId, CATALOG_KEY);
+      },
+      sanitizeCatalog,
+      CATALOG_SCOPE + "/" + CATALOG_KEY,
+      function () {
+        fetchCatalog(host, workspaceId);
+      },
+    );
   }
 
   function getTaskTagStore(taskId) {
@@ -498,25 +551,17 @@
   }
 
   function fetchTaskTags(host, taskId) {
-    var store = getTaskTagStore(taskId);
-    if (store.inFlight) return store.inFlight;
-    store.inFlight = host.storage.get(TASK_SCOPE, taskId, TASK_KEY).then(
-      function (entry) {
-        store.inFlight = null;
-        store.value = sanitizeTagIdList(entry ? entry.value : undefined);
-        store.loaded = true;
-        store.error = null;
-        notifyStoreListeners(store);
+    return fetchStore(
+      getTaskTagStore(taskId),
+      function () {
+        return host.storage.get(TASK_SCOPE, taskId, TASK_KEY);
       },
-      function (err) {
-        store.inFlight = null;
-        logError("load " + TASK_SCOPE + "/" + TASK_KEY, err);
-        store.loaded = true;
-        store.error = err;
-        notifyStoreListeners(store);
+      sanitizeTagIdList,
+      TASK_SCOPE + "/" + TASK_KEY,
+      function () {
+        fetchTaskTags(host, taskId);
       },
     );
-    return store.inFlight;
   }
 
   /**
@@ -603,6 +648,27 @@
   /** Evicts every cached task's tag ids (plugin unload, workspace switch -- D13/AC20). */
   function clearTaskTagCache() {
     taskTagStores = {};
+  }
+
+  /**
+   * Drops every cached store and the two flags guarding their one-shot
+   * host.storage subscriptions (`store.unsubscribe` lives on the store
+   * objects themselves; `taskTagWideUnsubscribe` is module-level).
+   *
+   * Must run whenever drainDisposables() runs, because draining is what
+   * actually tears those subscriptions down. Leaving the flags set after a
+   * drain makes ensureCatalogSubscription/ensureTaskTagWideSubscription
+   * short-circuit forever, so nothing ever resubscribes; and leaving
+   * `store.loaded` true makes useSharedStore skip its first-mount fetch, so
+   * every chip surface would keep serving pre-drain data with no live
+   * updates until a full page reload. Both destroy() and a re-entrant
+   * initialize() (the host re-runs initialize without a matching destroy --
+   * see initialize's own comment) need this.
+   */
+  function resetSharedStores() {
+    catalogStores = {};
+    clearTaskTagCache();
+    taskTagWideUnsubscribe = null;
   }
 
   // ---------------------------------------------------------------------
@@ -1797,8 +1863,12 @@
       // cached registration without a matching destroy() call in between
       // (see destroy's own comment), so drain any still-pending disposables
       // from a prior initialize() first -- otherwise each cycle stacks
-      // another live host.store/host.storage listener (D12).
+      // another live host.store/host.storage listener (D12) -- and reset the
+      // shared stores alongside it, since draining is what unsubscribed
+      // them (see resetSharedStores; without this the stores would never
+      // resubscribe or refetch again for the life of the page).
       drainDisposables();
+      resetSharedStores();
       var capabilities = detectHostCapabilities(registry, host);
       registry.registerComponent("task-card-tags", makeTagChips(host, { removable: true }));
       // Sidebar row / `/tasks` list row: smaller chips, no per-chip remove
@@ -1838,15 +1908,11 @@
     // calling host.storage.get on every workspace switch against a plugin
     // the backend now answers 404 "plugin is not active" for (D12).
     destroy: function () {
+      // Reset the shared stores alongside the drain that unsubscribed them
+      // -- a fresh initialize() after this must refetch rather than serve
+      // data cached from a now-unsubscribed plugin instance.
       drainDisposables();
-      clearTaskTagCache();
-      // Reset the shared catalog store too, and the wide task-tags
-      // subscribe flag (its underlying subscription was just torn down by
-      // drainDisposables() above) -- a fresh initialize() after this must
-      // refetch rather than serve data cached from a now-unsubscribed
-      // plugin instance.
-      catalogStores = {};
-      taskTagWideUnsubscribe = null;
+      resetSharedStores();
     },
     // Exposed for ui/bundle.test.js only -- not part of the KandevPlugin
     // contract consumed by the host, which only reads `initialize`.

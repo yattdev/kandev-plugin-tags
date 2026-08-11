@@ -13,7 +13,15 @@
   are now cached in one module-level store apiece (one coalesced in-flight
   `host.storage.get`, one `host.storage.subscribe`), so N chip
   rows/dropdowns mounted at once for the same workspace/task issue exactly
-  one read and one subscription between them, instead of one each.
+  one read and one subscription between them, instead of one each. The
+  coalescing never drops an invalidation: a change notification arriving
+  while a `get` is in flight (whose response is therefore already stale)
+  re-issues the fetch on settle instead of joining and being forgotten. And
+  a re-entrant `initialize()` -- the host re-runs it without a matching
+  `destroy()` on a boot race, an HMR re-boot, or a fresh store instance --
+  resets the stores alongside the subscription teardown, so the chip
+  surfaces resubscribe and refetch instead of serving a dead cache for the
+  life of the page.
 - A stored tag id that looks like a generated catalog id (see `makeTagId`)
   but is no longer in the catalog -- an orphaned tag left behind by a
   deletion -- now renders no chip at all, on every chip surface, instead of

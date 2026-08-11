@@ -636,6 +636,70 @@ test("shared data layer: N mounted rows for the same workspace share exactly one
   assert.equal(calls.workspaceSubscribe, 1, "one catalog subscribe shared across 3 mounted rows");
 });
 
+test("shared data layer: a change arriving mid-flight re-fetches instead of being swallowed by the coalescing", async () => {
+  const plugin = loadBundle();
+  const { makeTagChips } = plugin.__internal;
+
+  // The first response is what a `get` issued *before* the other tab's write
+  // returns -- already stale by the time it resolves. The second is what that
+  // write actually stored.
+  const taskResponses = [
+    { value: ["t1"], updatedAt: "t0" },
+    { value: ["t1", "t2"], updatedAt: "t1" },
+  ];
+  const resolvers = [];
+  const calls = { taskGet: 0 };
+  let taskSubscriber = null;
+
+  const host = makeFakeReactHost();
+  host.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  host.storage = {
+    get(scope) {
+      if (scope !== "task") {
+        return Promise.resolve({
+          value: [
+            { id: "t1", name: "urgent", color: "#ef4444" },
+            { id: "t2", name: "docs", color: "#22c55e" },
+          ],
+          updatedAt: "t0",
+        });
+      }
+      const i = calls.taskGet++;
+      return new Promise((resolve) => resolvers.push(() => resolve(taskResponses[i])));
+    },
+    subscribe(descriptor, handler) {
+      if (descriptor.scope === "task") taskSubscriber = handler;
+      return () => {};
+    },
+  };
+
+  const getTree = host.mount(makeTagChips(host, { removable: false, dense: true }), {
+    slotProps: { taskId: "task-1", workspaceId: "ws-1" },
+  });
+  await flush();
+  assert.equal(calls.taskGet, 1, "mounting issued the first get");
+
+  // Another tab writes task-1's tags while that first get is still in flight.
+  taskSubscriber({ scope: "task", scopeId: "task-1", key: "tags" });
+  assert.equal(calls.taskGet, 1, "the notification joins the in-flight get rather than racing a second one");
+
+  resolvers[0](); // the stale response lands
+  await flush();
+  assert.equal(calls.taskGet, 2, "settling with a pending invalidation re-issues the get");
+  resolvers[1]();
+  await flush();
+
+  const chipNames = getTree()
+    .children.flat()
+    .filter(Boolean)
+    .map((chip) => chip.children[0]);
+  assertStructural.deepEqual(
+    chipNames,
+    ["urgent", "docs"],
+    "the row settles on the post-write value, not the stale in-flight one",
+  );
+});
+
 test("the add-tag menu action carries a tag svg icon at mr-2 h-4 w-4, matching its neighbours", () => {
   const registered = { menuActions: [] };
   const plugin = loadBundle();
@@ -868,6 +932,78 @@ test("initialize twice without an intervening destroy still leaves one set of li
   const afterFirst = host.counts();
   plugin.initialize(makeFullRegistry(), host);
   assert.deepEqual(host.counts(), afterFirst, "re-initializing drains stale disposables before registering new ones");
+});
+
+test("a re-entrant initialize() (no destroy) re-subscribes and re-fetches the shared stores instead of serving a dead cache", async () => {
+  const plugin = loadBundle();
+  const calls = { taskGet: 0, taskSubscribe: 0, catalogSubscribe: 0 };
+  let liveSubscriptions = 0;
+
+  const sharedStore = { getState: () => ({ workspaces: { activeId: "ws-1" } }), subscribe: () => () => {} };
+  const sharedStorage = {
+    get(scope) {
+      if (scope === "task") {
+        calls.taskGet += 1;
+        return Promise.resolve({ value: ["t1"], updatedAt: "t0" });
+      }
+      return Promise.resolve({ value: [{ id: "t1", name: "urgent", color: "#ef4444" }], updatedAt: "t0" });
+    },
+    subscribe(descriptor) {
+      if (descriptor.scope === "task") calls.taskSubscribe += 1;
+      if (descriptor.scope === "workspace") calls.catalogSubscribe += 1;
+      liveSubscriptions += 1;
+      return () => {
+        liveSubscriptions -= 1;
+      };
+    },
+  };
+
+  /** Registers against a fresh fake-React host, returning that load's task-row-tags component. */
+  function loadAgainst() {
+    const host = makeFakeReactHost();
+    host.store = sharedStore;
+    host.storage = sharedStorage;
+    const components = {};
+    plugin.initialize(
+      {
+        registerComponent(name, Component) {
+          components[name] = Component;
+        },
+        registerTaskMenuAction() {},
+      },
+      host,
+    );
+    return { host, RowTags: components["task-row-tags"] };
+  }
+
+  const first = loadAgainst();
+  const firstTree = first.host.mount(first.RowTags, {
+    slotProps: { taskId: "task-1", workspaceId: "ws-1" },
+  });
+  await flush();
+  assert.equal(calls.taskSubscribe, 1, "the first mount opened the wide task-tags subscription");
+  assert.equal(calls.taskGet, 1);
+  assert.ok(firstTree(), "the first row rendered its chips");
+
+  // The host re-runs initialize() without a matching unloadPlugin()/destroy()
+  // -- a boot race, a dev HMR re-boot, or a fresh store instance; see
+  // apps/web/lib/plugins/host.ts's "Idempotent (re)load" comment. That drains
+  // the disposables, which is what unsubscribed the shared stores, so the
+  // stores have to be reset with them: otherwise their one-shot subscription
+  // guards stay set (nothing ever resubscribes) and `loaded` stays true
+  // (nothing ever refetches), and every chip surface serves the pre-drain
+  // cache with no live updates until a full page reload.
+  const second = loadAgainst();
+  const secondTree = second.host.mount(second.RowTags, {
+    slotProps: { taskId: "task-1", workspaceId: "ws-1" },
+  });
+  await flush();
+
+  assert.equal(calls.taskSubscribe, 2, "the re-entrant load opened a fresh wide task-tags subscription");
+  assert.equal(calls.catalogSubscribe, 2, "and a fresh catalog subscription");
+  assert.equal(calls.taskGet, 2, "and refetched rather than serving the now-unsubscribed cache");
+  assert.equal(liveSubscriptions, 2, "one wide task-tags + one catalog subscription live, not four");
+  assert.ok(secondTree(), "the row after the re-entrant load still renders its chips");
 });
 
 test("after destroy, a store-state change triggers zero further storage.get calls", () => {
