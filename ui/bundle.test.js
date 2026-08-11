@@ -233,6 +233,23 @@ test("resolveTag falls back to a legacy plain-string tag (id as name, DEFAULT_CO
   assertStructural.deepEqual(resolved, { id: "urgent", name: "urgent", color: DEFAULT_COLOR });
 });
 
+test("resolveTag returns null for an unresolved id shaped like a generated catalog id (an orphaned/deleted tag)", () => {
+  const { resolveTag, makeTagId } = loadBundle().__internal;
+  const orphanId = makeTagId();
+  assert.equal(resolveTag([], orphanId), null);
+  // Still null even when other, unrelated catalog entries exist.
+  assert.equal(resolveTag([{ id: "t1", name: "bug", color: "#fff" }], orphanId), null);
+});
+
+test("resolveTag still resolves a legacy plain-string id that happens not to match the generated-id shape", () => {
+  const { resolveTag, DEFAULT_COLOR } = loadBundle().__internal;
+  assertStructural.deepEqual(resolveTag([], "my custom tag"), {
+    id: "my custom tag",
+    name: "my custom tag",
+    color: DEFAULT_COLOR,
+  });
+});
+
 // -----------------------------------------------------------------------
 // sanitize helpers
 // -----------------------------------------------------------------------
@@ -434,11 +451,189 @@ test("bundle registers the task-card-tags slot, the main-top-bar button, and the
     host,
   );
   assert.ok(registered.components.some((c) => c.slot === "task-card-tags"));
+  assert.ok(registered.components.some((c) => c.slot === "task-row-tags"));
   assert.ok(registered.components.some((c) => c.slot === "main-top-bar"));
   const addTagAction = registered.menuActions.find((a) => a.id === "add-tag");
   assert.ok(addTagAction, "registers an add-tag menu action");
   // Flat, top-level item -- shipped in kdlbs/kandev PR #2351.
   assert.equal(addTagAction.group, "primary");
+});
+
+// -----------------------------------------------------------------------
+// task-row-tags: dense, non-removable chip row for the sidebar row and the
+// /tasks list row.
+// -----------------------------------------------------------------------
+
+test("task-row-tags renders chips with no remove control", async () => {
+  const plugin = loadBundle();
+  let TaskRowTags;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "task") return Promise.resolve({ value: ["t1"], updatedAt: "t0" });
+      return Promise.resolve({ value: [{ id: "t1", name: "urgent", color: "#ef4444" }], updatedAt: "t0" });
+    },
+    subscribe: () => () => {},
+  };
+  plugin.initialize(
+    {
+      registerComponent(slot, Component) {
+        if (slot === "task-row-tags") TaskRowTags = Component;
+      },
+      registerTaskMenuAction() {},
+    },
+    fakeHost,
+  );
+  assert.ok(TaskRowTags, "task-row-tags component registered");
+
+  const getTree = fakeHost.mount(TaskRowTags, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
+  await flush();
+
+  const row = getTree();
+  const chip = row.children[0][0];
+  assert.equal(chip.children[0], "urgent");
+  assert.equal(chip.children.length, 1, "no remove button child on a task-row-tags chip");
+});
+
+test("task-row-tags caps at 3 visible chips and shows a +N indicator beyond the cap", async () => {
+  const plugin = loadBundle();
+  let TaskRowTags;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  const catalog = Array.from({ length: 5 }, (_, i) => ({ id: "t" + i, name: "tag" + i, color: "#ef4444" }));
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "task") return Promise.resolve({ value: catalog.map((t) => t.id), updatedAt: "t0" });
+      return Promise.resolve({ value: catalog, updatedAt: "t0" });
+    },
+    subscribe: () => () => {},
+  };
+  plugin.initialize(
+    {
+      registerComponent(slot, Component) {
+        if (slot === "task-row-tags") TaskRowTags = Component;
+      },
+      registerTaskMenuAction() {},
+    },
+    fakeHost,
+  );
+
+  const getTree = fakeHost.mount(TaskRowTags, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
+  await flush();
+
+  const row = getTree();
+  const chips = row.children[0];
+  assert.equal(chips.length, 3, "caps at 3 visible chips");
+  const more = row.children[1];
+  assert.ok(more, "renders a +N indicator when there are more than 3 tags");
+  assert.equal(more.children[0], "+2");
+});
+
+test("task-row-tags shows no +N indicator at or under the 3-chip cap", async () => {
+  const plugin = loadBundle();
+  let TaskRowTags;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  const catalog = [{ id: "t1", name: "urgent", color: "#ef4444" }];
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "task") return Promise.resolve({ value: ["t1"], updatedAt: "t0" });
+      return Promise.resolve({ value: catalog, updatedAt: "t0" });
+    },
+    subscribe: () => () => {},
+  };
+  plugin.initialize(
+    {
+      registerComponent(slot, Component) {
+        if (slot === "task-row-tags") TaskRowTags = Component;
+      },
+      registerTaskMenuAction() {},
+    },
+    fakeHost,
+  );
+
+  const getTree = fakeHost.mount(TaskRowTags, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
+  await flush();
+
+  const row = getTree();
+  assert.equal(row.children[1], null, "no +N indicator under the cap");
+});
+
+// -----------------------------------------------------------------------
+// Shared data layer: catalog + task-tags stores dedupe concurrent reads
+// and subscriptions across every mounted chip-row/dropdown surface.
+// -----------------------------------------------------------------------
+
+test("shared data layer: two independently-mounted chip rows for the same task share one coalesced storage.get", async () => {
+  const plugin = loadBundle();
+  const { makeTagChips } = plugin.__internal;
+
+  const calls = { taskGet: 0 };
+  const sharedStorage = {
+    get(scope) {
+      if (scope === "task") {
+        calls.taskGet += 1;
+        return Promise.resolve({ value: ["t1"], updatedAt: "t0" });
+      }
+      return Promise.resolve({ value: [{ id: "t1", name: "urgent", color: "#ef4444" }], updatedAt: "t0" });
+    },
+    subscribe: () => () => {},
+  };
+  const sharedStore = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+
+  const hostA = makeFakeReactHost();
+  hostA.store = sharedStore;
+  hostA.storage = sharedStorage;
+  const TagChipsA = makeTagChips(hostA, { removable: true });
+
+  const hostB = makeFakeReactHost();
+  hostB.store = sharedStore;
+  hostB.storage = sharedStorage;
+  const TagChipsB = makeTagChips(hostB, { removable: true });
+
+  const getTreeA = hostA.mount(TagChipsA, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
+  const getTreeB = hostB.mount(TagChipsB, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
+  await flush();
+
+  assert.equal(calls.taskGet, 1, "one coalesced storage.get for the shared task's tags, across two mounted rows");
+  assert.ok(getTreeA(), "row A rendered");
+  assert.ok(getTreeB(), "row B rendered");
+});
+
+test("shared data layer: N mounted rows for the same workspace share exactly one catalog fetch and one subscribe", async () => {
+  const plugin = loadBundle();
+  const { makeTagChips } = plugin.__internal;
+
+  const calls = { workspaceGet: 0, workspaceSubscribe: 0 };
+  const sharedStorage = {
+    get(scope) {
+      if (scope === "workspace") calls.workspaceGet += 1;
+      if (scope === "task") return Promise.resolve({ value: [], updatedAt: "t0" });
+      return Promise.resolve({ value: [{ id: "t1", name: "urgent", color: "#ef4444" }], updatedAt: "t0" });
+    },
+    subscribe(descriptor) {
+      if (descriptor.scope === "workspace") calls.workspaceSubscribe += 1;
+      return () => {};
+    },
+  };
+  const sharedStore = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+
+  const hosts = [0, 1, 2].map(() => {
+    const h = makeFakeReactHost();
+    h.store = sharedStore;
+    h.storage = sharedStorage;
+    return h;
+  });
+  const components = hosts.map((h) => makeTagChips(h, { removable: true }));
+
+  hosts.forEach((h, i) => {
+    h.mount(components[i], { slotProps: { taskId: "task-" + i, workspaceId: "ws-1" } });
+  });
+  await flush();
+
+  assert.equal(calls.workspaceGet, 1, "one coalesced catalog fetch shared across 3 mounted rows");
+  assert.equal(calls.workspaceSubscribe, 1, "one catalog subscribe shared across 3 mounted rows");
 });
 
 test("the add-tag menu action carries a tag svg icon at mr-2 h-4 w-4, matching its neighbours", () => {
@@ -946,6 +1141,69 @@ test("TagChips falls back to legacy plain-string tags (unresolved id) with DEFAU
   assert.equal(chip.props.style.background, DEFAULT_COLOR);
 });
 
+test("TagChips skips a generated-shape unresolved (orphaned/deleted) tag id, rendering no chip for it", async () => {
+  const plugin = loadBundle();
+  const { makeTagId } = plugin.__internal;
+  let TagChips;
+  const orphanId = makeTagId();
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "task") return Promise.resolve({ value: [orphanId, "t1"], updatedAt: "t0" });
+      return Promise.resolve({ value: [{ id: "t1", name: "urgent", color: "#ef4444" }], updatedAt: "t0" });
+    },
+    subscribe: () => () => {},
+  };
+  plugin.initialize(
+    {
+      registerComponent(slot, Component) {
+        if (slot === "task-card-tags") TagChips = Component;
+      },
+      registerTaskMenuAction() {},
+    },
+    fakeHost,
+  );
+
+  const getTree = fakeHost.mount(TagChips, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
+  await flush();
+
+  const row = getTree();
+  assert.ok(row, "still renders since one tag (t1) resolves");
+  const chips = row.children[0];
+  assert.equal(chips.length, 1, "the orphaned generated-id tag renders no chip");
+  assert.equal(chips[0].children[0], "urgent");
+});
+
+test("TagChips renders nothing when every applied tag id is an orphaned generated-shape id", async () => {
+  const plugin = loadBundle();
+  const { makeTagId } = plugin.__internal;
+  let TagChips;
+  const orphanId = makeTagId();
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "task") return Promise.resolve({ value: [orphanId], updatedAt: "t0" });
+      return Promise.resolve({ value: [], updatedAt: "t0" });
+    },
+    subscribe: () => () => {},
+  };
+  plugin.initialize(
+    {
+      registerComponent(slot, Component) {
+        if (slot === "task-card-tags") TagChips = Component;
+      },
+      registerTaskMenuAction() {},
+    },
+    fakeHost,
+  );
+
+  const getTree = fakeHost.mount(TagChips, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
+  await flush();
+  assert.equal(getTree(), null);
+});
+
 test("TagChips renders nothing while loading or when there are no tags", async () => {
   const plugin = loadBundle();
   let TagChips;
@@ -1233,7 +1491,99 @@ test("TagsTopBarDropdown: clicking a tag's pill enters rename mode; committing r
   assert.ok(errorNode, "renaming to a clashing name surfaces an error");
 });
 
-test("TagsTopBarDropdown: each row has a color swatch that recolors the tag on blur", async () => {
+// -----------------------------------------------------------------------
+// Tags box (top-right dropdown): trigger/content sizing, row grid layout,
+// and the swatch-button + Update/Cancel color picker redesign.
+// -----------------------------------------------------------------------
+
+test("Tags box trigger uses size icon-lg and the dropdown content is 320px wide", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  const tree = getTree();
+  const trigger = tree.children[0].children[0];
+  assert.equal(trigger.props.size, "icon-lg");
+
+  const content = tree.children[1];
+  assert.match(content.props.className, /(^|\s)w-\[320px\](\s|$)/);
+});
+
+test("Tags box: the Create row's input can grow (flex:1, minWidth:0) and the Create button has a fixed width", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  const content = getTree().children[1];
+  const createRow = content.children[2];
+  assert.equal(createRow.props.style.display, "flex");
+  assert.equal(createRow.props.style.gap, "6px");
+  const [inputEl, buttonEl] = createRow.children;
+  assert.equal(inputEl.props.style.flex, 1);
+  assert.equal(inputEl.props.style.minWidth, 0);
+  assert.equal(buttonEl.props.style.flexShrink, 0, "Create button keeps a fixed width, unaffected by the name's length");
+});
+
+test("Tags box: each row is a CSS grid, and the delete button is a fixed 20x20 control (fixes the misaligned x)", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [
+    { id: "t1", name: "a-considerably-longer-tag-name", color: "#ef4444" },
+    { id: "t2", name: "x", color: "#3b82f6" },
+  ]);
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  const rows = getTree().children[1].children[4];
+  rows.forEach((row) => {
+    assert.equal(row.props.style.display, "grid");
+    assert.equal(row.props.style.gridTemplateColumns, "20px 1fr 24px");
+    const deleteButton = row.children[3];
+    assert.equal(deleteButton.props["data-testid"], "kandev-tags-topbar-delete");
+    assert.equal(deleteButton.props.style.width, "20px");
+    assert.equal(deleteButton.props.style.height, "20px");
+  });
+});
+
+test("Tags box: Tier 2 (filterSelectionApi) rows use a 4-column grid with a 16px checkbox column", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [{ id: "t1", name: "urgent", color: "#ef4444" }]);
+  fakeHost.taskFilters = makeFakeTaskFilters();
+
+  const capabilities = { taskFilter: true, filterSelectionApi: true, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  const rows = getTree().children[1].children[4];
+  assert.equal(rows[0].props.style.gridTemplateColumns, "20px 16px 1fr 24px");
+});
+
+test("Tags box color picker: the swatch is a button; clicking it opens a picker box beneath the row", async () => {
   const plugin = loadBundle();
   const { makeTagsTopBarDropdown } = plugin.__internal;
   const fakeHost = makeFakeReactHost();
@@ -1246,19 +1596,178 @@ test("TagsTopBarDropdown: each row has a color swatch that recolors the tag on b
   const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
   await flush();
 
-  let tree = getTree();
-  let rows = tree.children[1].children[4];
-  const colorSwatch = rows[0].children[0];
-  assert.equal(colorSwatch.props.type, "color");
-  assert.equal(colorSwatch.props.defaultValue, "#ef4444");
+  let rows = getTree().children[1].children[4];
+  const swatch = rows[0].children[0];
+  assert.equal(swatch.props["data-testid"], "kandev-tags-topbar-color-swatch");
+  assert.equal(swatch.props.style.background, "#ef4444");
+  assert.equal(rows.length, 1, "no picker box before the swatch is clicked");
 
-  colorSwatch.props.onBlur({ target: { value: "#00ff00" } });
+  swatch.props.onClick();
+  await flush();
+
+  rows = getTree().children[1].children[4];
+  assert.equal(rows.length, 2, "the picker box is inserted directly beneath the row");
+  assert.equal(rows[1].props["data-testid"], "kandev-tags-topbar-color-picker");
+});
+
+test("Tags box color picker: picking a palette swatch or typing a hex updates only local state, no storage.set", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [{ id: "t1", name: "bug", color: "#ef4444" }]);
+  let setCalls = 0;
+  const originalSet = fakeHost.storage.set.bind(fakeHost.storage);
+  fakeHost.storage.set = (...args) => {
+    setCalls += 1;
+    return originalSet(...args);
+  };
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  let rows = getTree().children[1].children[4];
+  rows[0].children[0].props.onClick(); // open the picker
+  await flush();
+
+  rows = getTree().children[1].children[4];
+  const picker = rows[1];
+  const paletteRow = picker.children[0];
+  paletteRow.children[1].props.onClick(); // pick the 2nd palette swatch
+  await flush();
+  assert.equal(setCalls, 0, "picking a palette swatch issues no storage write");
+
+  const hexInput = picker.children[1].children[0];
+  assert.equal(hexInput.props.type, "color");
+  hexInput.props.onChange({ target: { value: "#00ff00" } });
+  await flush();
+  assert.equal(setCalls, 0, "typing a hex issues no storage write");
+
+  rows = getTree().children[1].children[4];
+  const preview = rows[1].children[1].children[1];
+  assert.equal(preview.props["data-testid"], "kandev-tags-topbar-color-preview");
+  assert.equal(preview.props.style.background, "#00ff00", "the preview pill reflects the latest pending color");
+});
+
+test("Tags box color picker: Update writes the catalog exactly once with the pending color, then closes the picker", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown, PALETTE } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [{ id: "t1", name: "bug", color: "#ef4444" }]);
+  let setCalls = 0;
+  const originalSet = fakeHost.storage.set.bind(fakeHost.storage);
+  fakeHost.storage.set = (...args) => {
+    setCalls += 1;
+    return originalSet(...args);
+  };
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  let rows = getTree().children[1].children[4];
+  rows[0].children[0].props.onClick();
+  await flush();
+
+  rows = getTree().children[1].children[4];
+  rows[1].children[0].children[1].props.onClick(); // pick PALETTE[1]
+  await flush();
+
+  rows = getTree().children[1].children[4];
+  const [cancelButton, updateButton] = rows[1].children[2].children;
+  assert.equal(cancelButton.props["data-testid"], "kandev-tags-topbar-color-cancel");
+  assert.equal(updateButton.props["data-testid"], "kandev-tags-topbar-color-update");
+  updateButton.props.onClick();
   await flush();
   await flush();
 
-  tree = getTree();
-  rows = tree.children[1].children[4];
-  assert.equal(rows[0].children[0].props.defaultValue, "#00ff00", "the catalog reflects the new color");
+  assert.equal(setCalls, 1, "exactly one catalog write on Update");
+
+  rows = getTree().children[1].children[4];
+  assert.equal(rows.length, 1, "the picker closes after Update");
+  assert.equal(rows[0].children[0].props.style.background, PALETTE[1], "the swatch reflects the newly committed color");
+});
+
+test("Tags box color picker: Cancel discards the pending color, issues no write, and leaves the swatch unchanged", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [{ id: "t1", name: "bug", color: "#ef4444" }]);
+  let setCalls = 0;
+  const originalSet = fakeHost.storage.set.bind(fakeHost.storage);
+  fakeHost.storage.set = (...args) => {
+    setCalls += 1;
+    return originalSet(...args);
+  };
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  let rows = getTree().children[1].children[4];
+  rows[0].children[0].props.onClick();
+  await flush();
+
+  rows = getTree().children[1].children[4];
+  rows[1].children[0].children[1].props.onClick(); // pick a different palette color (pending only)
+  await flush();
+
+  rows = getTree().children[1].children[4];
+  const [cancelButton] = rows[1].children[2].children;
+  cancelButton.props.onClick();
+  await flush();
+
+  assert.equal(setCalls, 0, "Cancel issues no storage write");
+
+  rows = getTree().children[1].children[4];
+  assert.equal(rows.length, 1, "the picker closes after Cancel");
+  assert.equal(rows[0].children[0].props.style.background, "#ef4444", "the swatch color is unchanged from before the picker opened");
+});
+
+test("Tags box color picker: only one row's picker may be open at a time", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [
+    { id: "t1", name: "bug", color: "#ef4444" },
+    { id: "t2", name: "urgent", color: "#3b82f6" },
+  ]);
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  let rows = getTree().children[1].children[4];
+  rows[0].children[0].props.onClick(); // open t1's picker
+  await flush();
+
+  rows = getTree().children[1].children[4];
+  const pickersAfterFirst = rows.filter((r) => r.props && r.props["data-testid"] === "kandev-tags-topbar-color-picker");
+  assert.equal(pickersAfterFirst.length, 1);
+
+  const t2Row = rows.find(
+    (r) => r.props && r.props["data-testid"] === "kandev-tags-topbar-row" && r.children[2].children[0] === "urgent",
+  );
+  t2Row.children[0].props.onClick(); // open t2's picker
+  await flush();
+
+  rows = getTree().children[1].children[4];
+  const pickersAfterSecond = rows.filter((r) => r.props && r.props["data-testid"] === "kandev-tags-topbar-color-picker");
+  assert.equal(pickersAfterSecond.length, 1, "opening a second row's picker closes the first");
+  const openPicker = pickersAfterSecond[0];
+  assert.match(openPicker.props.key, /^t2-/, "the still-open picker belongs to t2, not t1");
 });
 
 test("regression: TagsTopBarDropdown has its own Create input, independent of the Add-tags modal (AC2)", async () => {

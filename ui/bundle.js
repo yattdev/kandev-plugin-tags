@@ -5,13 +5,21 @@
  * `initialize(registry, host)`, registers:
  *
  *   - a "task-card-tags" slot component (TagChips) rendering the current
- *     user's tags for a card as a colored chip row;
+ *     user's tags for a card as a colored chip row on the kanban card;
+ *   - a "task-row-tags" slot component (the same TagChips factory, in its
+ *     dense/non-removable mode) rendering that same chip row -- smaller,
+ *     capped at 3 chips plus a "+N" indicator, no per-chip remove button --
+ *     for the sidebar task row and the `/tasks` list row;
  *   - a registerTaskMenuAction under the kanban card's "primary" group
  *     ("Add tag...") that opens a redesigned host.openModal editor
  *     (TagPickerModal) to search/create and multi-select tags for the card;
- *   - a "main-top-bar" slot button ("Tags") that opens a management modal
- *     (TagManagerModal) to add/edit(name, color)/remove tags from the
- *     user's tag catalog;
+ *   - a "main-top-bar" slot button ("Tags box") that opens a
+ *     filter+manage dropdown (TagsTopBarDropdown) to add/rename/recolor/
+ *     remove tags from the user's tag catalog: an icon-lg trigger, a
+ *     320px-wide grid-aligned tag list (a stable delete-button column
+ *     regardless of tag name length), and a swatch-button color picker
+ *     with palette/hex swatches, a live preview, and explicit Update/
+ *     Cancel commit buttons (no write until Update);
  *   - (feature-detected) a `registerTaskFilter` contribution to the board's
  *     filter dropdown, active only on hosts that ship that extension point
  *     (shipped in kdlbs/kandev PR #2351; no-ops on older hosts).
@@ -26,8 +34,20 @@
  * Back-compat: v1 stored a card's tags as a plain array of tag-name strings
  * (no catalog, no color). Those entries are still valid task-scope values --
  * `resolveTag` treats any id that isn't found in the catalog as a legacy
- * plain-string tag, rendering the id itself as the name with DEFAULT_COLOR.
- * No migration write is performed; legacy and v2 tags can coexist on a card.
+ * plain-string tag, rendering the id itself as the name with DEFAULT_COLOR
+ * -- *unless* the id is shaped like a generated catalog id (see makeTagId),
+ * in which case it's an orphaned v2 tag (deleted from the catalog but still
+ * referenced by a stale card) and resolves to `null`; every chip surface
+ * skips a `null` resolution and renders no chip for it. No migration write
+ * is performed; legacy and v2 tags can coexist on a card.
+ *
+ * Shared data layer: the catalog and each task's applied-tag-id list are
+ * each cached in one module-level store (keyed by workspaceId / taskId
+ * respectively), with one coalesced in-flight `host.storage.get` and one
+ * `host.storage.subscribe` per entry -- so N simultaneously-mounted chip
+ * rows/dropdowns for the same workspace/task issue exactly one read and one
+ * subscription between them, not N. `useCatalog`/`useTaskTagIds` (the hooks
+ * every surface renders through) are thin wrappers over these stores.
  *
  * Every write races against a concurrent write from another tab/surface, so
  * all mutations read-modify-write against the entry's `updatedAt` via
@@ -44,9 +64,15 @@
   var MAX_TAG_LENGTH = 32;
   var MAX_TAGS_PER_TASK = 12;
   var CONFLICT_RETRY_LIMIT = 1;
-  var RECOLOR_DEBOUNCE_MS = 300;
   var UNTAGGED_FILTER_VALUE = "__untagged__";
   var TAGS_FILTER_ID = "tags";
+  var TASK_ROW_CHIP_LIMIT = 3;
+
+  // Shape of a generated catalog tag id (see makeTagId) -- used by
+  // resolveTag to distinguish an *orphaned* v2 tag id (deleted from the
+  // catalog but still referenced by a stale card) from a legacy v1
+  // plain-string tag name, which never looks like this.
+  var GENERATED_TAG_ID_RE = /^tag-[0-9a-z]+-[0-9a-z]+$/;
 
   // Distinct writerIds (not the shared per-tab default) so one surface's own
   // subscription doesn't treat another open surface's writes as its own echo
@@ -86,6 +112,18 @@
     lineHeight: 1,
     fontSize: "11px",
   };
+  // Dense variant for the task-row-tags slot (sidebar row / /tasks list
+  // row) -- smaller padding/font than the kanban card's task-card-tags
+  // chips, and (see makeTagChips) no per-chip remove control.
+  var DENSE_CHIP_ROW_STYLE = { display: "flex", flexWrap: "nowrap", gap: "3px", alignItems: "center", overflow: "hidden" };
+  var CHIP_MORE_STYLE = {
+    display: "inline-flex",
+    alignItems: "center",
+    fontSize: "10px",
+    color: "#6b7280",
+    padding: "0 2px",
+    flexShrink: 0,
+  };
 
   function chipStyle(color) {
     return {
@@ -101,6 +139,50 @@
       whiteSpace: "nowrap",
     };
   }
+
+  function denseChipStyle(color) {
+    return {
+      display: "inline-flex",
+      alignItems: "center",
+      padding: "0px 5px",
+      borderRadius: "999px",
+      background: color,
+      color: "#fff",
+      fontSize: "10px",
+      fontWeight: 500,
+      whiteSpace: "nowrap",
+      flexShrink: 0,
+    };
+  }
+
+  // Fixed 20x20 icon-only control -- used by the Tags box's per-row delete
+  // button (see makeTagsTopBarDropdown) so its x-offset is identical on
+  // every row regardless of the tag name's length (the bare, unstyled
+  // `<button>` it replaces sized itself to its "×" glyph, which drifted
+  // whenever the name pill's rendered width changed).
+  var TOPBAR_DELETE_BUTTON_STYLE = {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "20px",
+    height: "20px",
+    padding: 0,
+    border: "none",
+    background: "transparent",
+    lineHeight: 1,
+    cursor: "pointer",
+    borderRadius: "4px",
+    flexShrink: 0,
+  };
+
+  var TOPBAR_SWATCH_BUTTON_STYLE_BASE = {
+    width: "20px",
+    height: "20px",
+    padding: 0,
+    borderRadius: "4px",
+    cursor: "pointer",
+    flexShrink: 0,
+  };
 
   // ---------------------------------------------------------------------
   // Pure helpers (catalog + task tag-id lists + color/name validation).
@@ -212,14 +294,22 @@
   }
 
   /**
-   * Resolves a stored task tag-id to a displayable `{ id, name, color }`.
-   * Falls back to treating `id` itself as a legacy v1 plain-string tag name
-   * (DEFAULT_COLOR) when no catalog entry matches -- see the back-compat
-   * note at the top of this file.
+   * Resolves a stored task tag-id to a displayable `{ id, name, color }`,
+   * or `null` when `id` is an *orphaned* tag: it looks like a generated
+   * catalog id (GENERATED_TAG_ID_RE, matching makeTagId's shape) but isn't
+   * in the catalog -- i.e. the tag it once named has since been deleted.
+   * Callers must skip a `null` result and render no chip for it.
+   *
+   * Anything else unresolved is treated as a legacy v1 plain-string tag
+   * name (DEFAULT_COLOR) -- see the back-compat note at the top of this
+   * file. A legacy name never happens to match GENERATED_TAG_ID_RE in
+   * practice (that shape requires two base36 groups joined by a literal
+   * "tag-" prefix), so this doesn't regress v1 rendering.
    */
   function resolveTag(catalog, id) {
     var found = findTagById(catalog, id);
     if (found) return found;
+    if (typeof id === "string" && GENERATED_TAG_ID_RE.test(id)) return null;
     return { id: id, name: String(id), color: DEFAULT_COLOR };
   }
 
@@ -305,126 +395,231 @@
   }
 
   // ---------------------------------------------------------------------
-  // Hooks
+  // Shared data layer
+  //
+  // Every chip-rendering surface (task-card-tags, task-row-tags, the Tags
+  // box, the add-tag picker modal) needs the same two things: the active
+  // workspace's tag catalog, and a given task's applied tag-id list.
+  // Before this layer existed, each mounted component held its own
+  // independent useState/useEffect copy (see the old useStorageValue),
+  // so N cards showing chips for the same task -- or just task-card-tags
+  // and task-row-tags both mounted for one card -- issued N redundant
+  // `host.storage.get` calls and N redundant `host.storage.subscribe`
+  // registrations for the very same (scope, scopeId, key).
+  //
+  // These two module-level stores fix that: one cache entry per
+  // workspaceId (catalog) / per taskId (task tags), a single coalesced
+  // in-flight `get` per entry (a second caller arriving before the first
+  // resolves joins the same promise instead of issuing its own `get`), and
+  // exactly one `host.storage.subscribe` per entry -- for tasks, one *wide*
+  // subscribe (no scopeId, mirroring registerTagFilter's own wide
+  // `{ scope: TASK_SCOPE, key: TASK_KEY }` filter below) shared across
+  // every task, which invalidates just the one taskId that changed.
   // ---------------------------------------------------------------------
 
-  /**
-   * Returns `[value, loaded, refresh, error]`. A rejected `host.storage.get`
-   * sets `error` (and logs it via `logError`) instead of quietly settling on
-   * `value`'s empty default -- a failing read must never render as a healthy
-   * empty catalog (D1), or the only place the failure ever surfaces is the
-   * write path, with a generic "could not create" message that hides the
-   * real cause.
-   */
-  function useStorageValue(host, scope, scopeId, key, writerId, sanitize) {
-    var React = host.React;
-    var valueState = React.useState([]);
-    var value = valueState[0];
-    var setValue = valueState[1];
-    var loadedState = React.useState(false);
-    var loaded = loadedState[0];
-    var setLoaded = loadedState[1];
-    var errorState = React.useState(null);
-    var error = errorState[0];
-    var setError = errorState[1];
-    // Stable mutable box (used in lieu of useRef, which isn't guaranteed on
-    // every host.React implementation) so `refresh` can be called directly
-    // right after this component's own write completes -- host.storage's
-    // subscribe intentionally suppresses a writer's own echo (see
-    // PLUGIN-API.md's "own-tab echo suppression"), so relying on the
-    // subscription alone would leave a modal that just wrote a value
-    // showing stale data until some other write/tab happens to refresh it.
-    // Not using a lazy initializer function here: the plugin's minimal test
-    // React host doesn't invoke function-form useState initializers, so a
-    // plain object literal (thrown away on renders after the first, same as
-    // React does with any non-function initial value) keeps this portable.
-    var box = React.useState({ generation: 0, cancelled: false })[0];
+  var catalogStores = {}; // workspaceId -> store
+  var taskTagStores = {}; // taskId -> store
+  var taskTagWideUnsubscribe = null;
 
-    if (!scopeId) {
-      // No active workspace/task -- skip the storage call entirely (AC6)
-      // rather than issuing a request the backend will reject.
-      scopeId = null;
+  function makeStore() {
+    return { value: [], loaded: false, error: null, listeners: [], inFlight: null, unsubscribe: null };
+  }
+
+  function notifyStoreListeners(store) {
+    // Snapshot first -- a listener (a component's setState) can synchronously
+    // trigger an effect cleanup that mutates `store.listeners` mid-iteration.
+    store.listeners.slice().forEach(function (fn) {
+      fn();
+    });
+  }
+
+  function getCatalogStore(workspaceId) {
+    var store = catalogStores[workspaceId];
+    if (!store) {
+      store = catalogStores[workspaceId] = makeStore();
     }
+    return store;
+  }
 
-    function refresh() {
-      if (!scopeId) {
-        setValue([]);
-        setLoaded(true);
-        setError(null);
-        return;
-      }
-      var thisGeneration = ++box.generation;
-      host.storage.get(scope, scopeId, key).then(
-        function (entry) {
-          if (box.cancelled || thisGeneration !== box.generation) return;
-          setValue(sanitize(entry ? entry.value : undefined));
-          setLoaded(true);
-          setError(null);
-        },
-        function (err) {
-          if (box.cancelled || thisGeneration !== box.generation) return;
-          logError("load " + scope + "/" + key, err);
-          setLoaded(true);
-          setError(err);
+  /** Creates the catalog's one subscribe-per-workspace, idempotently. */
+  function ensureCatalogSubscription(host, workspaceId) {
+    var store = getCatalogStore(workspaceId);
+    if (!store.unsubscribe) {
+      store.unsubscribe = host.storage.subscribe(
+        { scope: CATALOG_SCOPE, scopeId: workspaceId, key: CATALOG_KEY },
+        function () {
+          fetchCatalog(host, workspaceId);
         },
       );
+      addDisposable(store.unsubscribe);
     }
+  }
+
+  /** Coalesced fetch: a caller arriving while one is already in flight joins it instead of issuing another `get`. */
+  function fetchCatalog(host, workspaceId) {
+    var store = getCatalogStore(workspaceId);
+    if (store.inFlight) return store.inFlight;
+    store.inFlight = host.storage.get(CATALOG_SCOPE, workspaceId, CATALOG_KEY).then(
+      function (entry) {
+        store.inFlight = null;
+        store.value = sanitizeCatalog(entry ? entry.value : undefined);
+        store.loaded = true;
+        store.error = null;
+        notifyStoreListeners(store);
+      },
+      function (err) {
+        store.inFlight = null;
+        logError("load " + CATALOG_SCOPE + "/" + CATALOG_KEY, err);
+        store.loaded = true;
+        store.error = err;
+        notifyStoreListeners(store);
+      },
+    );
+    return store.inFlight;
+  }
+
+  function getTaskTagStore(taskId) {
+    var store = taskTagStores[taskId];
+    if (!store) {
+      store = taskTagStores[taskId] = makeStore();
+    }
+    return store;
+  }
+
+  /** Creates the ONE wide (cross-task) task-tags subscribe, idempotently. */
+  function ensureTaskTagWideSubscription(host) {
+    if (taskTagWideUnsubscribe) return;
+    taskTagWideUnsubscribe = host.storage.subscribe({ scope: TASK_SCOPE, key: TASK_KEY }, function (change) {
+      var taskId = change && change.scopeId;
+      if (!taskId || !taskTagStores[taskId]) return; // nobody has asked for this task yet
+      fetchTaskTags(host, taskId);
+    });
+    addDisposable(taskTagWideUnsubscribe);
+  }
+
+  function fetchTaskTags(host, taskId) {
+    var store = getTaskTagStore(taskId);
+    if (store.inFlight) return store.inFlight;
+    store.inFlight = host.storage.get(TASK_SCOPE, taskId, TASK_KEY).then(
+      function (entry) {
+        store.inFlight = null;
+        store.value = sanitizeTagIdList(entry ? entry.value : undefined);
+        store.loaded = true;
+        store.error = null;
+        notifyStoreListeners(store);
+      },
+      function (err) {
+        store.inFlight = null;
+        logError("load " + TASK_SCOPE + "/" + TASK_KEY, err);
+        store.loaded = true;
+        store.error = err;
+        notifyStoreListeners(store);
+      },
+    );
+    return store.inFlight;
+  }
+
+  /**
+   * Generic hook over a shared (module-level) store: mounts subscribe to
+   * change notifications and trigger the first fetch; unmounts unsubscribe
+   * from the store's listener list only (the underlying host.storage
+   * subscription and any in-flight/cached data outlive any single
+   * component -- see ensureSubscription's own idempotency). Returns
+   * `[value, loaded, refresh, error]`, same shape the old per-component
+   * useStorageValue returned, so every call site (chip rows, modals) keeps
+   * working unchanged.
+   */
+  function useSharedStore(host, scopeId, getStore, ensureSubscription, fetchFn) {
+    var React = host.React;
+    var tickState = React.useState(0);
+    var setTick = tickState[1];
 
     React.useEffect(
       function () {
-        box.cancelled = false;
-        refresh();
         if (!scopeId) return undefined;
-        var unsubscribe = host.storage.subscribe(
-          { scope: scope, scopeId: scopeId, key: key, writerId: writerId },
-          refresh,
-        );
+        ensureSubscription(host, scopeId);
+        var store = getStore(scopeId);
+        function onChange() {
+          setTick(function (t) {
+            return t + 1;
+          });
+        }
+        store.listeners.push(onChange);
+        if (!store.loaded && !store.inFlight) fetchFn(host, scopeId);
         return function () {
-          box.cancelled = true;
-          unsubscribe();
+          var idx = store.listeners.indexOf(onChange);
+          if (idx !== -1) store.listeners.splice(idx, 1);
         };
       },
-      [scope, scopeId, key, writerId],
+      [scopeId],
     );
 
-    return [value, loaded, refresh, error];
+    if (!scopeId) return [[], true, function () {}, null];
+    var store = getStore(scopeId);
+    return [
+      store.value,
+      store.loaded,
+      function refresh() {
+        fetchFn(host, scopeId);
+      },
+      store.error,
+    ];
   }
 
   function useTaskTagIds(host, taskId, writerId) {
-    return useStorageValue(host, TASK_SCOPE, taskId, TASK_KEY, writerId, sanitizeTagIdList);
+    // writerId is accepted for call-site compatibility (and still used for
+    // the *write* path -- see readModifyWriteTaskTags) but no longer
+    // filters the shared store's subscribe: there is only one wide
+    // subscribe for the whole store (see ensureTaskTagWideSubscription),
+    // shared by every writer.
+    return useSharedStore(host, taskId || null, getTaskTagStore, ensureTaskTagWideSubscription, fetchTaskTags);
   }
 
   function useCatalog(host, workspaceId, writerId) {
-    return useStorageValue(host, CATALOG_SCOPE, workspaceId, CATALOG_KEY, writerId, sanitizeCatalog);
+    return useSharedStore(host, workspaceId || null, getCatalogStore, ensureCatalogSubscription, fetchCatalog);
   }
 
-  // In-memory cache of taskId -> resolved tag ids, populated as each card's
-  // TagChips instance mounts/refreshes. This is the only cross-card index
-  // the plugin has (host.storage has no bulk/cross-scopeId query -- see
-  // PluginStorageApi.list, which is scoped to a single (scope, scopeId)),
-  // so the board-wide Tags filter (once registerTaskFilter ships) can only
-  // ever reason about cards that have actually rendered their chips.
-  var taskTagCache = {};
+  /**
+   * The board-wide Tags filter's cross-card index -- now simply a read of
+   * the shared task-tags store (folded into one source of truth with
+   * useTaskTagIds instead of a second, independently-maintained cache).
+   * Undefined (not merely unloaded) when nothing has ever asked for this
+   * task's tags; callers treat that the same as "no tags" (untagged).
+   */
+  function getTaskTagCacheEntry(taskId) {
+    var store = taskTagStores[taskId];
+    return store && store.loaded ? store.value : undefined;
+  }
 
+  /** Populates/overwrites one task's cached tag ids directly (primeTaskTagCache's bulk scan; also used by tests). */
   function setTaskTagCache(taskId, tagIds) {
-    taskTagCache[taskId] = tagIds;
+    var store = getTaskTagStore(taskId);
+    store.value = tagIds;
+    store.loaded = true;
+    store.error = null;
+    notifyStoreListeners(store);
   }
 
   /** Evicts every cached task's tag ids (plugin unload, workspace switch -- D13/AC20). */
   function clearTaskTagCache() {
-    taskTagCache = {};
+    taskTagStores = {};
   }
 
   // ---------------------------------------------------------------------
   // Lifecycle: disposal of module-level (non-React) subscriptions.
   //
-  // React-owned subscriptions (host.storage.subscribe calls made inside a
-  // useEffect, e.g. useStorageValue) already clean up correctly via their
-  // effect's own return function on unmount -- this list is only for
-  // subscriptions created directly during initialize(), outside any
-  // component lifecycle (registerTagFilter's host.store.subscribe and its
-  // workspace-scoped host.storage.subscribe), which previously had nothing
-  // to release them (D12).
+  // This list holds every subscription whose lifetime is NOT scoped to a
+  // single mounted component: registerTagFilter's host.store.subscribe and
+  // its workspace-scoped host.storage.subscribe (created directly during
+  // initialize(), outside any component), plus the shared catalog/task-tags
+  // stores' host.storage.subscribe calls (ensureCatalogSubscription,
+  // ensureTaskTagWideSubscription) -- each created at most once, the first
+  // time any component asks for that store, and deliberately left running
+  // for as long as the store might have listeners again later, rather than
+  // torn down when the *last* subscribed component happens to unmount.
+  // Only plugin unload (destroy(), which drains this whole list) or a fresh
+  // initialize() (which drains it first -- see initialize's own comment)
+  // releases them (D12).
   // ---------------------------------------------------------------------
 
   var disposables = [];
@@ -450,9 +645,61 @@
   // task-card-tags: chip row
   // ---------------------------------------------------------------------
 
-  function makeTagChips(host) {
+  /**
+   * Builds a chip-row slot component. `opts.removable` (default `true`)
+   * controls whether each chip carries its own remove ("\u00d7") button --
+   * `task-card-tags` keeps it (removal from the kanban card chip row
+   * itself); `task-row-tags` (the sidebar row / `/tasks` list row) omits
+   * it, since removal there stays confined to the "Add tag..." modal.
+   * `opts.dense` (default `false`) switches to smaller chip padding/font
+   * and caps visible chips at TASK_ROW_CHIP_LIMIT with a trailing `+N`
+   * indicator -- `task-card-tags` renders every applied tag uncapped, to
+   * keep its existing behavior/output unchanged.
+   */
+  function makeTagChips(host, opts) {
+    opts = opts || {};
+    var removable = opts.removable !== false;
+    var dense = !!opts.dense;
     var React = host.React;
     var jsx = host.jsx;
+
+    function chipEl(tag, handleRemove) {
+      var spanArgs = [
+        "span",
+        {
+          key: tag.id,
+          "data-testid": "kandev-tags-chip",
+          className: "kandev-tags-chip",
+          style: dense ? denseChipStyle(tag.color) : chipStyle(tag.color),
+        },
+        tag.name,
+      ];
+      if (removable) {
+        spanArgs.push(
+          jsx(
+            "button",
+            {
+              type: "button",
+              "aria-label": "Remove tag " + tag.name,
+              "data-testid": "kandev-tags-chip-remove",
+              style: CHIP_REMOVE_BUTTON_STYLE,
+              // The chip row lives inside the kanban card's own clickable
+              // area (opens the task on click) -- without this, a click
+              // here also navigates into the task.
+              onClick: function (e) {
+                if (e && e.stopPropagation) e.stopPropagation();
+                handleRemove(tag.id);
+              },
+              onPointerDown: function (e) {
+                if (e && e.stopPropagation) e.stopPropagation();
+              },
+            },
+            "\u00d7",
+          ),
+        );
+      }
+      return jsx.apply(null, spanArgs);
+    }
 
     return function TagChips(props) {
       var slotProps = props.slotProps || {};
@@ -469,13 +716,6 @@
       var catalog = catalogAndLoaded[0];
       var catalogLoaded = catalogAndLoaded[1];
 
-      React.useEffect(
-        function () {
-          if (resolvedWorkspaceId && tagIdsLoaded) setTaskTagCache(taskId, tagIds);
-        },
-        [taskId, resolvedWorkspaceId, tagIdsLoaded, tagIds],
-      );
-
       if (!resolvedWorkspaceId || !tagIdsLoaded || !catalogLoaded || tagIds.length === 0) return null;
 
       function handleRemove(id) {
@@ -488,43 +728,35 @@
         });
       }
 
-      return jsx(
-        "div",
-        { "data-testid": "kandev-tags-chip-row", style: CHIP_ROW_STYLE },
-        tagIds.map(function (id) {
-          var tag = resolveTag(catalog, id);
-          return jsx(
-            "span",
-            {
-              key: id,
-              "data-testid": "kandev-tags-chip",
-              className: "kandev-tags-chip",
-              style: chipStyle(tag.color),
-            },
-            tag.name,
-            jsx(
-              "button",
-              {
-                type: "button",
-                "aria-label": "Remove tag " + tag.name,
-                "data-testid": "kandev-tags-chip-remove",
-                style: CHIP_REMOVE_BUTTON_STYLE,
-                // The chip row lives inside the kanban card's own clickable
-                // area (opens the task on click) -- without this, a click
-                // here also navigates into the task.
-                onClick: function (e) {
-                  if (e && e.stopPropagation) e.stopPropagation();
-                  handleRemove(id);
-                },
-                onPointerDown: function (e) {
-                  if (e && e.stopPropagation) e.stopPropagation();
-                },
-              },
-              "\u00d7",
-            ),
-          );
-        }),
-      );
+      // resolveTag returns null for an orphaned tag id (deleted from the
+      // catalog but still referenced by a stale card) -- skip it entirely
+      // rather than rendering a chip for a tag that no longer exists.
+      var resolvedTags = tagIds
+        .map(function (id) {
+          return resolveTag(catalog, id);
+        })
+        .filter(function (tag) {
+          return tag !== null;
+        });
+      if (resolvedTags.length === 0) return null;
+
+      var visibleTags = dense ? resolvedTags.slice(0, TASK_ROW_CHIP_LIMIT) : resolvedTags;
+      var hiddenCount = resolvedTags.length - visibleTags.length;
+      var chipEls = visibleTags.map(function (tag) {
+        return chipEl(tag, handleRemove);
+      });
+
+      if (!dense) {
+        // Unchanged output shape from before this generalization: exactly
+        // one children arg (the mapped chip array), uncapped.
+        return jsx("div", { "data-testid": "kandev-tags-chip-row", style: CHIP_ROW_STYLE }, chipEls);
+      }
+
+      var moreEl =
+        hiddenCount > 0
+          ? jsx("span", { key: "more", "data-testid": "kandev-tags-chip-more", style: CHIP_MORE_STYLE }, "+" + hiddenCount)
+          : null;
+      return jsx("div", { "data-testid": "kandev-tags-chip-row", style: DENSE_CHIP_ROW_STYLE }, chipEls, moreEl);
     };
   }
 
@@ -976,9 +1208,8 @@
       var refreshCatalog = catalogAndLoaded[2];
       var loadError = catalogAndLoaded[3];
 
-      // Not a lazy initializer function -- see useStorageValue's `box`
-      // comment: the plugin's minimal test React host doesn't invoke
-      // function-form useState initializers.
+      // Not a lazy initializer function: the plugin's minimal test React
+      // host doesn't invoke function-form useState initializers.
       var selectedState = React.useState(
         capabilities.filterSelectionApi ? host.taskFilters.getSelection(TAGS_FILTER_ID) : [],
       );
@@ -1001,6 +1232,15 @@
       var draftState = React.useState("");
       var draft = draftState[0];
       var setDraft = draftState[1];
+      // { tagId, pendingColor } of the one row whose color picker is open,
+      // or null. Picking a palette swatch or typing a hex only updates
+      // `pendingColor` here -- no storage write happens until "Update".
+      // Opening a second row's picker (a different tagId) simply replaces
+      // this single piece of state, which closes whichever picker was open
+      // before (only one may be open at a time).
+      var colorPickerState = React.useState(null);
+      var colorPicker = colorPickerState[0];
+      var setColorPicker = colorPickerState[1];
 
       var displayError =
         error || (loadError ? withDetail("Could not load tags. Please try again.", loadError) : null);
@@ -1091,6 +1331,45 @@
           });
       }
 
+      // Toggles a row's color picker box open/closed. Opening one closes
+      // any other that was open (there is only one piece of state).
+      function toggleColorPicker(tag) {
+        if (colorPicker && colorPicker.tagId === tag.id) {
+          setColorPicker(null);
+          return;
+        }
+        setColorPicker({ tagId: tag.id, pendingColor: tag.color });
+      }
+
+      // Local-only -- picking a palette swatch or typing a hex must never
+      // write to storage by itself (that was the "doesn't apply until
+      // blur" bug: the old bare `<input type="color">` wrote on blur with
+      // no way to preview or discard first).
+      function setPendingColor(nextColor) {
+        setColorPicker(function (current) {
+          if (!current) return current;
+          return Object.assign({}, current, { pendingColor: nextColor });
+        });
+      }
+
+      // Update: writes the pending color via the existing handleRecolor ->
+      // readModifyWriteCatalog path exactly once, then closes the picker.
+      // Every other chip surface already subscribes to the catalog store
+      // under its own writerId (see useCatalog), so they repaint on their
+      // own once this write lands -- no extra plumbing needed here.
+      function commitColor(tag) {
+        handleRecolor(tag.id, colorPicker.pendingColor);
+        setColorPicker(null);
+      }
+
+      // Cancel: discards the pending color and closes the picker with no
+      // storage write. The swatch itself always renders the catalog's
+      // committed tag.color (never pendingColor), so simply closing the
+      // picker already "restores" it -- there is nothing else to revert.
+      function cancelColorPicker() {
+        setColorPicker(null);
+      }
+
       function openDeleteConfirm(tag) {
         var modal = host.openModal({
           title: "Delete tag",
@@ -1106,7 +1385,7 @@
         ui.Button,
         {
           variant: "outline",
-          size: "sm",
+          size: "icon-lg",
           type: "button",
           className: "cursor-pointer",
           "data-testid": "kandev-tags-topbar-button",
@@ -1134,7 +1413,7 @@
         jsx(ui.DropdownMenuTrigger, { asChild: true }, triggerButton),
         jsx(
           ui.DropdownMenuContent,
-          { align: "end", className: "w-[260px]", "data-testid": "kandev-tags-topbar-content" },
+          { align: "end", className: "w-[320px] p-2", "data-testid": "kandev-tags-topbar-content" },
           jsx(
             "div",
             { className: "text-muted-foreground text-xs px-2 py-1.5" },
@@ -1149,7 +1428,11 @@
               value: draft,
               placeholder: "New tag name…",
               maxLength: MAX_TAG_LENGTH,
-              style: { flex: 1, height: "28px" },
+              // flex:1/minWidth:0 so the input can grow to fill the box's
+              // full 320px width -- a 32-char name must fit with no
+              // horizontal scroll -- while the Create button (below) keeps
+              // a fixed width instead of being squeezed by a long name.
+              style: { flex: 1, minWidth: 0, height: "28px" },
               onChange: function (e) {
                 setDraft(e.target.value);
               },
@@ -1164,6 +1447,7 @@
                 size: "sm",
                 "data-testid": "kandev-tags-topbar-create",
                 disabled: !canCreate,
+                style: { flexShrink: 0, width: "60px" },
                 onClick: handleCreate,
               },
               "Create",
@@ -1174,90 +1458,217 @@
             ? jsx("div", { className: "text-muted-foreground text-xs px-2 py-1.5" }, "Loading…")
             : catalog.length === 0
               ? jsx("div", { className: "text-muted-foreground text-xs px-2 py-1.5" }, "No tags yet.")
-              : catalog.map(function (tag) {
-                  var isChecked = selected.indexOf(tag.id) !== -1;
-                  return jsx(
-                    "div",
-                    {
-                      key: tag.id,
-                      "data-testid": "kandev-tags-topbar-row",
-                      style: { display: "flex", alignItems: "center", gap: "8px", padding: "4px 8px" },
-                    },
-                    // Uncontrolled + commit-on-blur, same rationale as the
-                    // retired Manage Tags modal's color picker (D9): the
-                    // native picker's own onChange can fire continuously
-                    // while dragging, so committing there would write on
-                    // every intermediate hue.
-                    jsx("input", {
-                      type: "color",
-                      "data-testid": "kandev-tags-topbar-color",
-                      "aria-label": "Recolor tag " + tag.name,
-                      defaultValue: tag.color,
-                      style: {
-                        width: "20px",
-                        height: "20px",
-                        padding: 0,
-                        border: "none",
-                        background: "none",
-                        cursor: "pointer",
-                        flexShrink: 0,
-                      },
-                      onBlur: function (e) {
-                        if (e.target.value !== tag.color) handleRecolor(tag.id, e.target.value);
-                      },
-                    }),
-                    capabilities.filterSelectionApi
-                      ? jsx(ui.Checkbox, {
-                          "data-testid": "kandev-tags-topbar-checkbox",
-                          checked: isChecked,
-                          onCheckedChange: function () {
-                            toggleFilter(tag.id);
-                          },
-                        })
-                      : null,
-                    renamingId === tag.id
-                      ? jsx(ui.Input, {
-                          autoFocus: true,
-                          "data-testid": "kandev-tags-topbar-rename-input",
-                          defaultValue: tag.name,
-                          maxLength: MAX_TAG_LENGTH,
-                          style: { height: "24px", flex: 1 },
-                          onBlur: function (e) {
-                            handleRename(tag.id, e.target.value);
-                          },
-                          onKeyDown: function (e) {
-                            if (e.key === "Enter") handleRename(tag.id, e.target.value);
-                            if (e.key === "Escape") setRenamingId(null);
-                          },
-                        })
-                      : jsx(
-                          "span",
-                          {
-                            style: Object.assign({ flex: 1, cursor: "pointer" }, chipStyle(tag.color)),
-                            "data-testid": "kandev-tags-topbar-pill",
-                            onClick: function () {
-                              setRenamingId(tag.id);
-                            },
-                          },
-                          tag.name,
-                        ),
-                    jsx(
-                      "button",
-                      {
-                        type: "button",
-                        "aria-label": "Delete tag " + tag.name,
-                        "data-testid": "kandev-tags-topbar-delete",
-                        onClick: function () {
-                          openDeleteConfirm(tag);
-                        },
-                      },
-                      "×",
-                    ),
-                  );
-                }),
+              : buildTagRows(),
           displayError ? jsx("div", { "data-testid": "kandev-tags-topbar-error" }, displayError) : null,
         ),
       );
+
+      /**
+       * One `{ display: "grid", ... }` row per catalog tag (swatch,
+       * optional filter checkbox, name pill/rename input, delete button --
+       * see tagRowStyle for the grid's column widths), plus -- inserted
+       * directly beneath the one row whose color picker is open, if any --
+       * that row's picker box. Built as a flat array (rather than nesting
+       * the picker inside the row) so the row's own DOM stays a single grid
+       * with a stable, name-length-independent delete-column x-offset.
+       */
+      function buildTagRows() {
+        var rows = [];
+        catalog.forEach(function (tag) {
+          rows.push(tagRowEl(tag));
+          if (colorPicker && colorPicker.tagId === tag.id) rows.push(colorPickerBoxEl(tag));
+        });
+        return rows;
+      }
+
+      function tagRowEl(tag) {
+        var isChecked = selected.indexOf(tag.id) !== -1;
+        return jsx(
+          "div",
+          {
+            key: tag.id,
+            "data-testid": "kandev-tags-topbar-row",
+            style: tagRowStyle(capabilities),
+          },
+          jsx("button", {
+            type: "button",
+            "data-testid": "kandev-tags-topbar-color-swatch",
+            "aria-label": "Recolor tag " + tag.name,
+            onClick: function () {
+              toggleColorPicker(tag);
+            },
+            style: Object.assign({ background: tag.color, border: "1px solid rgba(0,0,0,0.15)" }, TOPBAR_SWATCH_BUTTON_STYLE_BASE),
+          }),
+          capabilities.filterSelectionApi
+            ? jsx(ui.Checkbox, {
+                "data-testid": "kandev-tags-topbar-checkbox",
+                checked: isChecked,
+                onCheckedChange: function () {
+                  toggleFilter(tag.id);
+                },
+              })
+            : null,
+          renamingId === tag.id
+            ? jsx(ui.Input, {
+                autoFocus: true,
+                "data-testid": "kandev-tags-topbar-rename-input",
+                defaultValue: tag.name,
+                maxLength: MAX_TAG_LENGTH,
+                style: { height: "24px", minWidth: 0 },
+                onBlur: function (e) {
+                  handleRename(tag.id, e.target.value);
+                },
+                onKeyDown: function (e) {
+                  if (e.key === "Enter") handleRename(tag.id, e.target.value);
+                  if (e.key === "Escape") setRenamingId(null);
+                },
+              })
+            : jsx(
+                "span",
+                {
+                  style: Object.assign(
+                    { minWidth: 0, cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis" },
+                    chipStyle(tag.color),
+                  ),
+                  "data-testid": "kandev-tags-topbar-pill",
+                  onClick: function () {
+                    setRenamingId(tag.id);
+                  },
+                },
+                tag.name,
+              ),
+          jsx(
+            "button",
+            {
+              type: "button",
+              "aria-label": "Delete tag " + tag.name,
+              "data-testid": "kandev-tags-topbar-delete",
+              className: "hover:bg-accent",
+              onClick: function () {
+                openDeleteConfirm(tag);
+              },
+              style: TOPBAR_DELETE_BUTTON_STYLE,
+            },
+            "×",
+          ),
+        );
+      }
+
+      /**
+       * The picker box rendered directly beneath `tag`'s row while its
+       * color swatch is toggled open: the PALETTE as swatch buttons (the
+       * pending color outlined), a native hex `<input type="color">`
+       * feeding the same pending-color state, a live preview pill, and
+       * Update/Cancel. Picking a swatch or typing a hex only calls
+       * setPendingColor -- no storage write.
+       */
+      function colorPickerBoxEl(tag) {
+        var pending = colorPicker.pendingColor;
+        return jsx(
+          "div",
+          {
+            key: tag.id + "-color-picker",
+            "data-testid": "kandev-tags-topbar-color-picker",
+            style: {
+              display: "flex",
+              flexDirection: "column",
+              gap: "8px",
+              padding: "8px",
+              margin: "0 4px 4px",
+              border: "1px solid rgba(0,0,0,0.12)",
+              borderRadius: "6px",
+            },
+          },
+          jsx.apply(
+            null,
+            ["div", { style: { display: "flex", gap: "4px", flexWrap: "wrap" } }].concat(
+              PALETTE.map(function (color) {
+                var isPending = pending && pending.toLowerCase() === color.toLowerCase();
+                return jsx("button", {
+                  key: color,
+                  type: "button",
+                  "data-testid": "kandev-tags-topbar-color-palette-swatch",
+                  "aria-label": "Color " + color,
+                  "aria-pressed": isPending,
+                  onClick: function () {
+                    setPendingColor(color);
+                  },
+                  style: Object.assign(
+                    { background: color, border: isPending ? "2px solid #111827" : "1px solid rgba(0,0,0,0.15)" },
+                    TOPBAR_SWATCH_BUTTON_STYLE_BASE,
+                  ),
+                });
+              }),
+            ),
+          ),
+          jsx(
+            "div",
+            { style: { display: "flex", alignItems: "center", gap: "8px" } },
+            jsx("input", {
+              type: "color",
+              "data-testid": "kandev-tags-topbar-color-hex-input",
+              "aria-label": "Custom color for " + tag.name,
+              value: HEX_COLOR_RE.test(pending) ? pending : DEFAULT_COLOR,
+              onChange: function (e) {
+                setPendingColor(e.target.value);
+              },
+              style: { width: "28px", height: "28px", padding: 0, border: "none", background: "none", cursor: "pointer" },
+            }),
+            jsx(
+              "span",
+              { "data-testid": "kandev-tags-topbar-color-preview", style: chipStyle(pending) },
+              tag.name,
+            ),
+          ),
+          jsx(
+            "div",
+            { style: { display: "flex", justifyContent: "flex-end", gap: "6px" } },
+            jsx(
+              ui.Button,
+              {
+                type: "button",
+                size: "sm",
+                variant: "outline",
+                "data-testid": "kandev-tags-topbar-color-cancel",
+                onClick: cancelColorPicker,
+              },
+              "Cancel",
+            ),
+            jsx(
+              ui.Button,
+              {
+                type: "button",
+                size: "sm",
+                "data-testid": "kandev-tags-topbar-color-update",
+                onClick: function () {
+                  commitColor(tag);
+                },
+              },
+              "Update",
+            ),
+          ),
+        );
+      }
+    };
+  }
+
+  /**
+   * Grid column widths for one Tags-box tag row: a fixed 20px swatch
+   * column, an optional 16px filter-checkbox column (Tier 2 only -- see
+   * detectHostCapabilities' filterSelectionApi), a flexible name-pill
+   * column, and a fixed 24px delete column. `alignItems: "center"` plus
+   * this fixed sizing is what keeps the delete button's x-offset identical
+   * on every row regardless of the tag name's length (the bug this
+   * replaces: a bare flex row where a long name pushed the delete button
+   * around).
+   */
+  function tagRowStyle(capabilities) {
+    return {
+      display: "grid",
+      gridTemplateColumns: capabilities.filterSelectionApi ? "20px 16px 1fr 24px" : "20px 1fr 24px",
+      alignItems: "center",
+      gap: "8px",
+      padding: "4px 8px",
     };
   }
 
@@ -1369,9 +1780,9 @@
       matches: function (context, selected) {
         if (!selected || selected.length === 0) return true;
         // Cards that haven't mounted their TagChips yet have no cache entry
-        // -- see the taskTagCache comment above. Treat that as "no tags"
-        // rather than excluding the card outright.
-        var tagIds = taskTagCache[context.taskId] || [];
+        // -- see getTaskTagCacheEntry's comment above. Treat that as "no
+        // tags" rather than excluding the card outright.
+        var tagIds = getTaskTagCacheEntry(context.taskId) || [];
         if (selected.indexOf(UNTAGGED_FILTER_VALUE) !== -1 && tagIds.length === 0) return true;
         return tagIds.some(function (id) {
           return selected.indexOf(id) !== -1;
@@ -1389,7 +1800,11 @@
       // another live host.store/host.storage listener (D12).
       drainDisposables();
       var capabilities = detectHostCapabilities(registry, host);
-      registry.registerComponent("task-card-tags", makeTagChips(host));
+      registry.registerComponent("task-card-tags", makeTagChips(host, { removable: true }));
+      // Sidebar row / `/tasks` list row: smaller chips, no per-chip remove
+      // (removal stays confined to the "Add tag..." modal), capped at
+      // TASK_ROW_CHIP_LIMIT visible chips plus a "+N" indicator.
+      registry.registerComponent("task-row-tags", makeTagChips(host, { removable: false, dense: true }));
       registry.registerComponent("main-top-bar", makeTagsTopBarDropdown(host, capabilities));
 
       registry.registerTaskMenuAction({
@@ -1425,6 +1840,13 @@
     destroy: function () {
       drainDisposables();
       clearTaskTagCache();
+      // Reset the shared catalog store too, and the wide task-tags
+      // subscribe flag (its underlying subscription was just torn down by
+      // drainDisposables() above) -- a fresh initialize() after this must
+      // refetch rather than serve data cached from a now-unsubscribed
+      // plugin instance.
+      catalogStores = {};
+      taskTagWideUnsubscribe = null;
     },
     // Exposed for ui/bundle.test.js only -- not part of the KandevPlugin
     // contract consumed by the host, which only reads `initialize`.
@@ -1454,6 +1876,7 @@
       DEFAULT_COLOR: DEFAULT_COLOR,
       UNTAGGED_FILTER_VALUE: UNTAGGED_FILTER_VALUE,
       TAGS_FILTER_ID: TAGS_FILTER_ID,
+      makeTagChips: makeTagChips,
       makeTagPickerModal: makeTagPickerModal,
       makeTagsTopBarDropdown: makeTagsTopBarDropdown,
       makeDeleteTagConfirm: makeDeleteTagConfirm,
