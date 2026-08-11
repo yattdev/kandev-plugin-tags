@@ -1,5 +1,9 @@
 # Tags
 
+## Demo
+
+[Screencast from 2026-08-10 20-27-55.webm](https://github.com/user-attachments/assets/48e20153-c77d-4816-83a2-d9a9fa7c37a3)
+
 Add one or more colored tags to any kanban card. Tags are yours alone: each
 user's tags and tag catalog are private and never shown to teammates.
 
