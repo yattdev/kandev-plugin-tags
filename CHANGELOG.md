@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.4.0] - 2026-08-11
+
+### Added
+
+- Tags now also render on the sidebar task row and the `/tasks` list row
+  (a new `task-row-tags` slot), as a dense chip row capped at 3 visible
+  chips plus a "+N" indicator, with no per-chip remove control -- removing
+  a tag stays confined to the "Add tag..." modal on that surface. The
+  existing kanban card chip row (`task-card-tags`) is unchanged.
+- A shared data layer: the tag catalog and each task's applied-tag-id list
+  are now cached in one module-level store apiece (one coalesced in-flight
+  `host.storage.get`, one `host.storage.subscribe`), so N chip
+  rows/dropdowns mounted at once for the same workspace/task issue exactly
+  one read and one subscription between them, instead of one each.
+- A stored tag id that looks like a generated catalog id (see `makeTagId`)
+  but is no longer in the catalog -- an orphaned tag left behind by a
+  deletion -- now renders no chip at all, on every chip surface, instead of
+  a chip labeled with the raw id. A legacy v1 plain-string tag name still
+  renders exactly as before.
+
+### Changed
+
+- The Tags box (the top-bar dropdown) is redesigned:
+  - its trigger is now `size: "icon-lg"` (previously smaller);
+  - the dropdown itself is 320px wide (previously 260px), wide enough that
+    a full 32-character tag name fits the Create input with no horizontal
+    scroll;
+  - each tag row is a `20px 1fr 24px` CSS grid (`20px 16px 1fr 24px` with a
+    Tier-2 filter checkbox column), so the delete button's x-offset is
+    identical on every row regardless of the tag name's length -- fixing
+    the "delete button doesn't line up" bug;
+  - the color swatch is now a button that opens a picker box beneath that
+    row: the color palette and a native hex input feed a single pending
+    color (no storage write), with a live preview pill and explicit
+    **Update**/**Cancel** buttons -- fixing the "color doesn't apply until
+    blur, with no way to preview or discard it first" bug. Only one row's
+    picker may be open at a time.
+
 ## [0.3.0] - 2026-08-10
 
 ### Changed
