@@ -28,19 +28,28 @@ const bundleSource = fs.readFileSync(path.join(__dirname, "bundle.js"), "utf8");
  * itself (`__internal`, populated at the bottom of bundle.js for this
  * purpose only).
  */
-function loadBundle(consoleOverride) {
+/**
+ * `extraGlobals` are merged into the bundle's context. The bundle runs in its
+ * own vm realm, so a global the browser would supply -- `CSS`, say -- is
+ * absent unless injected here; setting it on the test realm's `globalThis`
+ * has no effect on the bundle.
+ */
+function loadBundle(consoleOverride, extraGlobals) {
   let plugin = null;
-  const context = {
-    console: consoleOverride || console,
-    setTimeout,
-    clearTimeout,
-    window: {
-      registerKandevPlugin(id, definition) {
-        assert.equal(id, "kandev-plugin-tags");
-        plugin = definition;
+  const context = Object.assign(
+    {
+      console: consoleOverride || console,
+      setTimeout,
+      clearTimeout,
+      window: {
+        registerKandevPlugin(id, definition) {
+          assert.equal(id, "kandev-plugin-tags");
+          plugin = definition;
+        },
       },
     },
-  };
+    extraGlobals,
+  );
   vm.runInNewContext(bundleSource, context, { filename: "ui/bundle.js" });
   assert.ok(plugin, "bundle registered the plugin");
   return plugin;
@@ -93,6 +102,52 @@ test("normalizeColor rejects malformed or non-hex input", () => {
   assert.equal(normalizeColor("#ff00a"), null);
   assert.equal(normalizeColor(""), null);
   assert.equal(normalizeColor(null), null);
+});
+
+// Regression: sanitizeCatalog accepts any string as a tag colour and
+// normalizeColor only guards the write path, so a value that never went
+// through this plugin's UI reached the DOM unvalidated. The browser dropped
+// the whole declaration, leaving a transparent background behind
+// chipStyle's hard-coded `color: "#fff"` -- an invisible chip name.
+test("renderableColor passes hex straight through", () => {
+  const { renderableColor } = loadBundle().__internal;
+  assert.equal(renderableColor("#ef4444"), "#ef4444");
+  assert.equal(renderableColor("#fff"), "#fff");
+  assert.equal(renderableColor("  #ef4444  "), "#ef4444");
+});
+
+test("renderableColor falls back to DEFAULT_COLOR for values that cannot render", () => {
+  const { renderableColor, DEFAULT_COLOR } = loadBundle().__internal;
+  assert.equal(renderableColor(null), DEFAULT_COLOR);
+  assert.equal(renderableColor(42), DEFAULT_COLOR);
+  assert.equal(renderableColor(""), DEFAULT_COLOR);
+  assert.equal(renderableColor("   "), DEFAULT_COLOR);
+});
+
+test("renderableColor defers to the browser's parser: named colours survive, garbage does not", () => {
+  const CSS = { supports: (prop, value) => prop === "color" && value === "red" };
+  const { renderableColor, DEFAULT_COLOR } = loadBundle(null, { CSS }).__internal;
+  // A named colour is a legitimate stored value (older catalogs, imports)
+  // and renders correctly, so it must NOT be reduced to DEFAULT_COLOR.
+  assert.equal(renderableColor("red"), "red");
+  // The CSS-injection payload from QA: the browser rejects the whole
+  // declaration, so the chip would render transparent + white text.
+  assert.equal(
+    renderableColor("red;position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:99999"),
+    DEFAULT_COLOR,
+  );
+});
+
+test("chip styles never emit an unrenderable background", () => {
+  const { chipStyle, denseChipStyle, DEFAULT_COLOR } = loadBundle(null, {
+    CSS: { supports: () => false },
+  }).__internal;
+  assert.equal(chipStyle("not-a-colour").background, DEFAULT_COLOR);
+  assert.equal(denseChipStyle("not-a-colour").background, DEFAULT_COLOR);
+  // The paired text colour is what makes a bad background unreadable.
+  assert.equal(chipStyle("not-a-colour").color, "#fff");
+  // Hex still passes through untouched with a parser that rejects everything.
+  assert.equal(chipStyle("#ef4444").background, "#ef4444");
 });
 
 // -----------------------------------------------------------------------

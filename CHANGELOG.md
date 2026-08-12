@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.1] - 2026-08-12
+
+### Fixed
+
+- A tag whose stored colour is not something the browser can render no
+  longer produces an unreadable chip. `sanitizeCatalog` accepts any string
+  as a colour while `normalizeColor` only guards the write path, so a value
+  that never went through this plugin's UI reached the DOM unvalidated; the
+  browser then dropped the declaration entirely, leaving a transparent
+  background behind the chip's hard-coded white text. Such values now fall
+  back to `DEFAULT_COLOR` at every chip surface and at the Tags box swatch.
+  Hex is passed straight through, and a named or functional colour --
+  `"red"`, `"rgb(1 2 3)"` -- is checked with `CSS.supports` rather than
+  rejected, so catalogs holding one keep rendering it.
+
 ## [0.5.0] - 2026-08-12
 
 ### Changed

@@ -150,6 +150,35 @@
     flexShrink: 0,
   };
 
+  /**
+   * A background colour safe to render a white-on-colour chip with.
+   *
+   * `sanitizeCatalog` accepts any string as a tag's `color` (it only checks
+   * the type), while `normalizeColor` guards the *write* path -- so a value
+   * that never went through this plugin's UI can reach the DOM unvalidated.
+   * The browser then drops the whole declaration, leaving a transparent
+   * background behind chipStyle's hard-coded `color: "#fff"`: a chip whose
+   * name is invisible on the light theme.
+   *
+   * Hex passes immediately (the only shape this plugin writes). Anything
+   * else is asked of the browser's own parser rather than rejected, because
+   * a named or functional colour -- `"red"`, `"rgb(1 2 3)"` -- is a
+   * legitimate value an older catalog or an import may hold, and those
+   * render correctly today. Where there is no parser (the DOM-less test
+   * host) the value passes through, matching the previous behaviour instead
+   * of silently recolouring tags in a context that renders nothing anyway.
+   */
+  function renderableColor(raw) {
+    if (typeof raw !== "string") return DEFAULT_COLOR;
+    var trimmed = raw.trim();
+    if (trimmed === "") return DEFAULT_COLOR;
+    if (HEX_COLOR_RE.test(trimmed)) return trimmed;
+    if (typeof CSS !== "undefined" && CSS && typeof CSS.supports === "function") {
+      return CSS.supports("color", trimmed) ? trimmed : DEFAULT_COLOR;
+    }
+    return trimmed;
+  }
+
   function chipStyle(color) {
     return {
       display: "inline-flex",
@@ -157,7 +186,7 @@
       gap: "4px",
       padding: "1px 7px",
       borderRadius: "999px",
-      background: color,
+      background: renderableColor(color),
       color: "#fff",
       fontSize: "11px",
       fontWeight: 500,
@@ -171,7 +200,7 @@
       alignItems: "center",
       padding: "0px 5px",
       borderRadius: "999px",
-      background: color,
+      background: renderableColor(color),
       color: "#fff",
       fontSize: "10px",
       fontWeight: 500,
@@ -1591,7 +1620,10 @@
             onClick: function () {
               toggleColorPicker(tag);
             },
-            style: Object.assign({ background: tag.color, border: "1px solid rgba(0,0,0,0.15)" }, TOPBAR_SWATCH_BUTTON_STYLE_BASE),
+            style: Object.assign(
+              { background: renderableColor(tag.color), border: "1px solid rgba(0,0,0,0.15)" },
+              TOPBAR_SWATCH_BUTTON_STYLE_BASE,
+            ),
           }),
           capabilities.filterSelectionApi
             ? jsx(ui.Checkbox, {
@@ -1964,6 +1996,9 @@
       readModifyWrite: readModifyWrite,
       sanitizeTagIdList: sanitizeTagIdList,
       sanitizeCatalog: sanitizeCatalog,
+      renderableColor: renderableColor,
+      chipStyle: chipStyle,
+      denseChipStyle: denseChipStyle,
       MAX_TAG_LENGTH: MAX_TAG_LENGTH,
       MAX_TAGS_PER_TASK: MAX_TAGS_PER_TASK,
       TOPBAR_WIDTH: TOPBAR_WIDTH,
