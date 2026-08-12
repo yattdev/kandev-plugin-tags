@@ -10,10 +10,11 @@
   `3aa9ba6`). Measured in Chrome at the input's computed 12px font: the
   self-hosted app font (Figtree) is 11.22px at its widest ASCII glyph, the
   fallback stack (Segoe UI / Arial) 12.18px. The 12px/char bound is therefore
-  a deliberate cover for the fallback, not a margin over the app font — which
-  is why the guard holds 22 and rejects 23 (23 fits the app font at 258px but
-  not the fallback at 280px). Before the fix the two modelling errors cancelled
-  at 22 characters, which is what made the budget look closed.
+  aimed at the fallback rather than being a margin over the app font — which is
+  why the guard holds 22 and rejects 23 (23 fits the app font at 258px but not
+  the fallback at 280px). Before the fix the two modelling errors cancelled at
+  22 characters, which is what made the budget look closed. See the 0.5.5 entry
+  below for the one respect in which 12px/char is *not* a full cover.
 - `ui/bundle.js:68-89`, `:1556` — the geometry comments stated the budget wrong
   in three places: `262px` twice where the arithmetic gives `282px`, and
   `w-[360px]` for the `w-[320px]` class that was actually replaced. Those
@@ -25,9 +26,28 @@
   reachable on a host that supports `registerTaskFilter` (this one does not),
   but the invariant should hold everywhere. (commit `8d092d7`)
 
-Version is `0.5.3`, not `0.5.2`: `ui/bundle.js` changed, so the installer needs a
-new version, and 0.5.2 was spent on a build installed on the QA host during
-review and then withdrawn.
+- `ui/bundle.js:74-79`, `CHANGELOG.md` — the geometry comment claimed the
+  regression test "sizes the budget for the wider of the two" measured glyphs,
+  and the changelog that the 12px bound "holds for both". Neither is true at
+  the cap: 22 x 12.18px = 268px against 264px of text area, so the bound sits
+  ~4px *under* the fallback's worst case rather than covering it (the app font
+  fits outright at 247px). The comment now says so; 0.5.4's changelog entry is
+  left as written, since that build shipped to the QA host, and the correction
+  is recorded in the new 0.5.5 entry instead. Practical exposure is a
+  22-character all-wide-glyph name during the font-load window only.
+  `MAX_TAG_LENGTH` stays 22 — the requested cap — and the guard still holds 22
+  and rejects 23. This is the
+  third pass over these same numbers, which is the argument for keeping the
+  arithmetic in the comment rather than the intent. Version moved to 0.5.5 for
+  it, since `ui/bundle.js` changed and 0.5.4 was already installed on QA.
+
+Version is `0.5.5`. Each bump here is forced by the same rule, not cosmetic: any
+`ui/bundle.js` change needs a new version because the installer rejects a reused
+one with a 409, and every preceding number is spent on a build that was actually
+installed on the QA host — 0.5.2 during review (then withdrawn), 0.5.3, and
+0.5.4 for the QA re-run that validated the nine requirement checks against a
+served bundle diffed byte-identical to source. 0.5.5 covers the comment
+correction above.
 
 ### Considered and rejected
 
@@ -52,4 +72,14 @@ reverted rather than shipped as dead CSS.
 
 ## Action required by author
 
-None.
+- **`fix/tag-chip-contrast` collides with this branch on version and base.**
+  That branch (task `61cdcf0a`, the follow-up below) is stacked on `85a76e6`,
+  two commits behind this branch's tip, and independently bumps
+  `manifest.yaml` from `0.5.3` to **`0.5.4`** — a number this branch had
+  already taken in `3aa9ba6` *and* installed on the QA host. Because both
+  sides write the identical value, `manifest.yaml` merges *cleanly* and ships
+  a different bundle under a version already claimed, which is exactly the
+  reuse the installer answers with a 409. `CHANGELOG.md` will conflict
+  outright, as both add a `[0.5.4]` section. This branch is now at `0.5.5`, so
+  land it first, then rebase that one onto this tip and renumber it to
+  **`0.5.6`**. Flagged to that task directly.
