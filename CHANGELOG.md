@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.4] - 2026-08-12
+
+### Fixed
+
+- The Create input's width budget is now calibrated against a measured
+  worst-case glyph. The regression test compared a 22-character name to the
+  input's *border* box, so the host `Input`'s own 16px padding and 2px
+  border counted as room for text -- the budget read 18px roomier than it
+  is. Measured in Chrome at the input's 12px font: the self-hosted app font
+  (Figtree) is 11.22px at its widest ASCII glyph, the fallback stack
+  (Segoe UI / Arial) 12.18px. The test now measures the content box against
+  a 12px bound, which holds for both.
+
 ## [0.5.3] - 2026-08-12
 
 (0.5.2 was installed on a test host during review and then withdrawn, so
