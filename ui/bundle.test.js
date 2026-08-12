@@ -909,6 +909,45 @@ test("registerTaskFilter registers even when activeWorkspaceId isn't set yet, an
   assert.ok(optionValues.includes("__untagged__"));
 });
 
+test("task filter options carry a renderable colour", async () => {
+  // The host paints an option's `color` onto a swatch, so it needs the same
+  // guard the chips have: an unparseable stored colour would render blank.
+  const plugin = loadBundle(null, { CSS: { supports: () => false } });
+  const { DEFAULT_COLOR } = plugin.__internal;
+  let filterRegistration = null;
+  const host = makeMinimalHost({
+    store: { getState: () => ({ workspaces: { activeId: "ws-1" } }), subscribe: () => () => {} },
+    storage: {
+      get: (scope, scopeId, key) =>
+        scope === "workspace" && key === "tags-catalog"
+          ? Promise.resolve({
+              value: [
+                { id: "t1", name: "urgent", color: "#ef4444" },
+                { id: "t2", name: "broken", color: "not-a-colour" },
+              ],
+              updatedAt: "t0",
+            })
+          : Promise.resolve(undefined),
+      subscribe: () => () => {},
+    },
+  });
+  plugin.initialize(
+    {
+      registerComponent() {},
+      registerTaskMenuAction() {},
+      registerTaskFilter(registration) {
+        filterRegistration = registration;
+      },
+    },
+    host,
+  );
+  await flush();
+
+  const byValue = Object.fromEntries(filterRegistration.getOptions().map((o) => [o.value, o.color]));
+  assert.equal(byValue.t1, "#ef4444", "a hex colour is passed through untouched");
+  assert.equal(byValue.t2, DEFAULT_COLOR, "an unparseable colour falls back");
+});
+
 // -----------------------------------------------------------------------
 // Lifecycle: disposal on destroy(), idempotent initialize(), cache eviction
 // -----------------------------------------------------------------------
@@ -1724,6 +1763,14 @@ test("Tags box: a full-length tag name fits the Create input with no horizontal 
   const GAP = 6; // the Create row's flex gap
   const inputWidth = TOPBAR_WIDTH - BOX_PADDING - ROW_PADDING - CREATE_BUTTON_WIDTH - GAP;
 
+  // The text scrolls against the input's *content* box, not its border box,
+  // so the host Input's own chrome comes out too: `px-2` (8px a side) plus a
+  // 1px border. Confirmed live -- a 282px input reports clientWidth 280.
+  // Leaving it in made the budget look 18px roomier than it is, enough to
+  // wave through a MAX_TAG_LENGTH the box cannot actually hold.
+  const INPUT_CHROME = 18;
+  const textWidth = inputWidth - INPUT_CHROME;
+
   // Widest glyph in the input's font measured ~11.66px in Chrome at the
   // Tags box's font-size; 12 is a deliberately pessimistic bound so this
   // fails before a real user can produce a scrollbar.
@@ -1731,9 +1778,9 @@ test("Tags box: a full-length tag name fits the Create input with no horizontal 
   const worstCaseName = MAX_TAG_LENGTH * WORST_CASE_PX_PER_CHAR;
 
   assert.ok(
-    worstCaseName <= inputWidth,
-    `a ${MAX_TAG_LENGTH}-char name needs up to ${worstCaseName}px but the Create input is only ${inputWidth}px ` +
-      `(TOPBAR_WIDTH=${TOPBAR_WIDTH}, CREATE_BUTTON_WIDTH=${CREATE_BUTTON_WIDTH}) — it would scroll horizontally`,
+    worstCaseName <= textWidth,
+    `a ${MAX_TAG_LENGTH}-char name needs up to ${worstCaseName}px but the Create input only fits ${textWidth}px ` +
+      `of text (TOPBAR_WIDTH=${TOPBAR_WIDTH}, CREATE_BUTTON_WIDTH=${CREATE_BUTTON_WIDTH}) — it would scroll horizontally`,
   );
 });
 

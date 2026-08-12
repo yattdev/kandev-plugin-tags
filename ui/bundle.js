@@ -67,20 +67,23 @@
   var TASK_KEY = "tags";
   // 22, not 32: the Tags box is a fixed-width dropdown, so the Create input's
   // width is whatever the box has left after its padding and the Create
-  // button -- 282px at TOPBAR_WIDTH. A 32-character name needs ~253px of that
-  // for ordinary lowercase and ~373px in the worst case (all wide glyphs), so
-  // "32 characters, no horizontal scroll" was not satisfiable at any sane box
-  // width. At 22 the worst case is 262px, which the box is now sized to hold.
+  // button -- 282px at TOPBAR_WIDTH, of which 264px is text area once the
+  // input's own padding and border are taken out. A 32-character name needs
+  // ~253px for ordinary lowercase and ~373px in the worst case (all wide
+  // glyphs), so "32 characters, no horizontal scroll" was not satisfiable at
+  // any sane box width. At 22 the worst case is ~257px (the widest glyph
+  // measures ~11.66px), which the box is now sized to hold.
   var MAX_TAG_LENGTH = 22;
 
   // Tags box geometry. These three are one budget, so they live together:
   //   input = TOPBAR_WIDTH - 16 (p-2) - 16 (row padding) - CREATE_BUTTON_WIDTH
-  //           - 6 (gap)  =  282px
+  //           - 6 (gap)  =  282px, less the host Input's own 16px padding and
+  //           2px border  =  264px of text area
   // which is what a 22-character name needs at its widest. Changing any of
   // them without re-checking MAX_TAG_LENGTH reintroduces the horizontal
   // scroll (see the regression test in ui/bundle.test.js).
   //
-  // Applied as an inline width rather than a `w-[360px]` class on purpose:
+  // Applied as an inline width rather than a `w-[320px]` class on purpose:
   // Tailwind only emits an arbitrary-value utility if it appears in source it
   // scans, and the host does not scan this bundle. `w-[320px]` happened to
   // work only because unrelated host components used the same literal, which
@@ -1554,7 +1557,8 @@
               // horizontal scroll -- while the Create button (below) keeps
               // a fixed width instead of being squeezed by a long name.
               // The budget: TOPBAR_WIDTH - 16 (p-2) - 16 (row padding)
-              // - CREATE_BUTTON_WIDTH - 6 (gap) = 262px of input.
+              // - CREATE_BUTTON_WIDTH - 6 (gap) = 282px of input, 264px of
+              // it text area once the input's padding and border are out.
               style: { flex: 1, minWidth: 0, height: "28px" },
               onChange: function (e) {
                 setDraft(e.target.value);
@@ -1899,7 +1903,10 @@
       getOptions: function () {
         return catalog
           .map(function (tag) {
-            return { value: tag.id, label: tag.name, color: tag.color };
+            // renderableColor for the same reason the chips use it: the host
+            // paints this straight onto a swatch, and a stored colour it
+            // cannot parse would leave that swatch blank.
+            return { value: tag.id, label: tag.name, color: renderableColor(tag.color) };
           })
           .concat([{ value: UNTAGGED_FILTER_VALUE, label: "Untagged" }]);
       },

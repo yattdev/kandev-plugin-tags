@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.3] - 2026-08-12
+
+(0.5.2 was installed on a test host during review and then withdrawn, so
+that number is spent -- the installer refuses to reuse a version.)
+
+### Fixed
+
+- A task-filter option's colour goes through the same `renderableColor`
+  guard the chips use, so a stored colour the browser cannot parse leaves
+  its filter swatch grey rather than blank. (Only reachable on a host that
+  supports `registerTaskFilter`.)
+
 ## [0.5.1] - 2026-08-12
 
 ### Fixed
