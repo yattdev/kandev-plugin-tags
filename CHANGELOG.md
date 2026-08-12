@@ -15,14 +15,25 @@ entry lands here when that branch merges first.)
   a result -- `#eab308` yellow, `#22c55e` green, `#f97316` orange -- because
   white on them fell below the 3.0 contrast floor (1.92 / 2.28 / 2.80); the
   other four palette colours and `DEFAULT_COLOR` are unchanged.
-- `renderableColor` now also rejects a background that resolves to fully
-  transparent -- `"transparent"`, `"rgba(0,0,0,0)"`, an 8-digit hex with a
-  zero alpha byte, `"hsla(...,0)"` -- along with `"currentcolor"` (which as
-  a chip background names the chip's own label colour, so it renders white
-  on white) and, given a real DOM to resolve against, a value like
-  `"var(--x)"` that CSS accepts but that can't be reduced to concrete RGB.
-  All fall back to `DEFAULT_COLOR`, same as an unparseable value already
-  did.
+- `renderableColor` now also rejects a background that is not fully opaque.
+  Alpha zero -- `"transparent"`, `"rgba(0,0,0,0)"`, an 8-digit hex with a
+  zero alpha byte, `"hsla(...,0)"` -- is only the degenerate case: any
+  `0 < alpha < 1` composites with the host surface behind the chip, so the
+  colour in the catalog is not the colour rendered, and the contrast pass
+  above would measure the named colour instead of what the user sees
+  (`"#00000019"` measures as pure black, keeps white text, and renders as
+  roughly `#e6e6e6` under it on a light card). The host surface is not
+  readable from a plugin and changes with its theme, so these fall back to
+  `DEFAULT_COLOR` rather than being composited. `normalizeColor` only ever
+  writes opaque 3/6-digit hex, so no colour this plugin produces is
+  affected. An alpha-carrying hex is now settled before the `CSS.supports`
+  branch, so a host with no `CSS` object no longer lets `"#ffffff00"`
+  through untouched.
+- `renderableColor` also rejects `"currentcolor"` (which as a chip background
+  names the chip's own label colour, so it renders white on white) and, given
+  a real DOM to resolve against, a value like `"var(--x)"` that CSS accepts
+  but that can't be reduced to concrete RGB. Both fall back to
+  `DEFAULT_COLOR`, same as an unparseable value already did.
 - Colours are resolved by reading back a pixel painted on a probe canvas
   rather than by parsing the canvas's `fillStyle` string, so a modern
   colour function a browser renders perfectly well -- `oklch(...)`,

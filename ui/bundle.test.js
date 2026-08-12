@@ -349,6 +349,66 @@ test("renderableColor falls back to DEFAULT_COLOR for a fully-transparent colour
   assert.equal(renderableColor("hsla(0,0%,0%,0)"), DEFAULT_COLOR);
 });
 
+// Regression: alpha zero is only the degenerate case. A chip background with
+// 0 < alpha < 1 composites with the host surface behind it, so the colour in
+// the catalog is not the colour rendered -- chipTextColor would measure the
+// named one and pair confident text with a chip that is barely there.
+// #00000019 measures as pure black, scores 21 against white, and so kept
+// white text over what renders as roughly #e6e6e6 on a light card: contrast
+// ~1.2, the reported bug reached by degree instead of by kind. The host
+// surface is not readable from here (it is theme-dependent), so anything not
+// fully opaque falls back rather than being composited.
+test("renderableColor falls back to DEFAULT_COLOR for a partially transparent colour", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { renderableColor, chipStyle, denseChipStyle, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
+  for (const translucent of ["#00000019", "#0000001a", "#ffffff40", "#11223344", "#f008", "rgba(0,0,0,0.05)"]) {
+    assert.equal(renderableColor(translucent), DEFAULT_COLOR, translucent);
+    assert.equal(chipStyle(translucent).background, DEFAULT_COLOR, translucent);
+    assert.equal(denseChipStyle(translucent).background, DEFAULT_COLOR, translucent);
+  }
+  // Fully opaque stays untouched, including the alpha-carrying hex spellings.
+  assert.equal(renderableColor("#ffffffff"), "#ffffffff");
+  assert.equal(renderableColor("#f00f"), "#f00f");
+  assert.equal(renderableColor("rgb(1, 2, 3)"), "rgb(1, 2, 3)");
+});
+
+// An alpha-carrying hex needs no parser and no document to measure, so it
+// must not depend on the CSS.supports branch -- a host with no `CSS` object
+// skips that branch entirely and previously let #ffffff00 through untouched.
+test("renderableColor rejects a see-through hex with no CSS and no document", () => {
+  const { renderableColor, DEFAULT_COLOR } = loadBundle().__internal;
+  assert.equal(renderableColor("#ffffff00"), DEFAULT_COLOR);
+  assert.equal(renderableColor("#00000019"), DEFAULT_COLOR);
+  assert.equal(renderableColor("#f008"), DEFAULT_COLOR);
+  assert.equal(renderableColor("#ffffffff"), "#ffffffff");
+});
+
+// The invariant relativeLuminance depends on: it ignores alpha, which is only
+// sound because renderableColor has already refused everything translucent.
+test("every background chipStyle emits is fully opaque", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { chipStyle, denseChipStyle, resolveRgb, PALETTE, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
+  const inputs = PALETTE.concat([
+    DEFAULT_COLOR,
+    "#00000019",
+    "#ffffff00",
+    "transparent",
+    "currentcolor",
+    "rgba(0,0,0,0.5)",
+    "not-a-colour",
+    "",
+  ]);
+  for (const input of inputs) {
+    for (const style of [chipStyle(input), denseChipStyle(input)]) {
+      const rgb = resolveRgb(style.background);
+      assert.ok(rgb, `chip background for ${JSON.stringify(input)} did not resolve`);
+      assert.equal(rgb.a, 1, `chip background for ${JSON.stringify(input)} is not opaque`);
+    }
+  }
+});
+
 // Regression (found in QA against a real headless Chromium): a colour the
 // browser renders perfectly well must not be greyed out just because its
 // `fillStyle` serialization is unparseable. Chrome echoes `oklch(...)`,

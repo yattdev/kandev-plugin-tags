@@ -295,7 +295,14 @@
     return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
   }
 
-  /** WCAG relative luminance of an {r,g,b} object (alpha ignored -- callers resolve alpha upstream). */
+  /**
+   * WCAG relative luminance of an {r,g,b} object. Alpha is ignored, which is
+   * only sound on an opaque colour: a translucent background composites with
+   * whatever surface is behind the chip, and this plugin cannot read that
+   * surface (it is the host's, and theme-dependent). `renderableColor` is
+   * what upholds that -- it rejects anything not fully opaque -- so every
+   * background reaching here via chipStyle/denseChipStyle is opaque.
+   */
   function relativeLuminance(rgb) {
     return 0.2126 * srgbChannel(rgb.r) + 0.7152 * srgbChannel(rgb.g) + 0.0722 * srgbChannel(rgb.b);
   }
@@ -322,6 +329,12 @@
    * contrast ratio against white falls below CHIP_TEXT_MIN_CONTRAST (3.0,
    * WCAG AA for graphical objects), in which case the dark token. An
    * unresolvable background gets white, matching the pre-contrast default.
+   *
+   * Expects an already-renderable background -- i.e. a `renderableColor`
+   * return value, which is opaque by construction. Measuring a translucent
+   * colour here would read the colour itself rather than the surface it
+   * composites into, and pair confident text with a chip that is barely
+   * there (see relativeLuminance).
    */
   function chipTextColor(background) {
     if (!resolveRgb(background)) return CHIP_TEXT_LIGHT;
@@ -337,9 +350,21 @@
    * that never went through this plugin's UI can reach the DOM unvalidated.
    * Two ways that goes wrong: the browser drops an unparseable declaration
    * entirely, leaving a transparent background; or the declaration parses
-   * fine but resolves to fully transparent (`"transparent"`,
+   * fine but resolves to a see-through one (`"transparent"`,
    * `"rgba(0,0,0,0)"`, an 8-digit hex with a zero alpha byte). Either way
    * the chip becomes invisible against whatever text colour pairs with it.
+   *
+   * Anything not fully opaque is refused, not just alpha zero. A chip
+   * background with `0 < alpha < 1` composites with the host surface behind
+   * it, so the colour named in the catalog is not the colour rendered --
+   * `chipTextColor` would measure the named one and pair confident text with
+   * a chip that is barely there (`"#00000019"` measures as pure black,
+   * scores 21 against white, keeps white text, and renders as roughly
+   * `#e6e6e6` under it on a light card). Compositing it out here is not
+   * possible: the surface belongs to the host and changes with its theme.
+   * `normalizeColor` only ever writes opaque 3/6-digit hex, so nothing this
+   * plugin produces is affected -- only values arriving by the other routes
+   * above, for which falling back to a legible gray is already the answer.
    *
    * `currentcolor` is refused by name and needs no parser at all: it is
    * unreadable by construction, not merely unmeasurable (see
@@ -364,12 +389,16 @@
     if (trimmed === "") return DEFAULT_COLOR;
     if (CURRENT_COLOR_RE.test(trimmed)) return DEFAULT_COLOR;
     if (HEX_COLOR_RE.test(trimmed)) return trimmed;
+    // A hex carrying an alpha channel is measurable with no parser and no
+    // document at all, so it is settled here rather than inside the
+    // CSS.supports branch -- which a host without a `CSS` object skips
+    // entirely, and which would otherwise let `#ffffff00` through untouched.
+    if (HEX_RGBA_RE.test(trimmed)) return parseHexRgb(trimmed).a < 1 ? DEFAULT_COLOR : trimmed;
     if (typeof CSS !== "undefined" && CSS && typeof CSS.supports === "function") {
       if (!CSS.supports("color", trimmed)) return DEFAULT_COLOR;
       var rgb = resolveRgb(trimmed);
-      // A resolved-but-fully-transparent value (e.g. an 8-digit hex, which
-      // resolveRgb parses with no document needed) is unrenderable either way.
-      if (rgb !== null && rgb.a === 0) return DEFAULT_COLOR;
+      // A resolved-but-see-through value is unrenderable either way.
+      if (rgb !== null && rgb.a < 1) return DEFAULT_COLOR;
       // A `null` resolution is only conclusive when there was a real DOM to
       // resolve against -- with no `document` (the DOM-less test host),
       // resolveRgb has no browser to ask about an ordinary named colour, so

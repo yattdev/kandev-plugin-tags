@@ -32,6 +32,24 @@ unreleased version.
   `0.5.4` and the installer rejects a reused version with
   `409 version already installed`. `0.5.5` is free (`0.5.2` is spent — installed
   on the QA host during review, then withdrawn).
+- `ui/bundle.js:372` — `renderableColor` rejected a background only at alpha
+  exactly 0, and `relativeLuminance` ignored alpha outright, so a colour with
+  `0 < alpha < 1` was measured as if opaque and the invisible-chip bug this
+  branch closes stayed open by degree. `chipStyle("#00000019")` returned
+  background `#00000019` with text `#ffffff` — a 10%-opaque black chip
+  (≈ `#e6e6e6` over a light card) carrying white text, contrast ≈ 1.2 —
+  reachable by the same `tags-catalog` user-state PUT that QA used for
+  `"transparent"` and `"currentcolor"`. Anything not fully opaque now falls
+  back to `DEFAULT_COLOR`. Compositing was rejected as the alternative: the
+  surface behind a chip belongs to the host and changes with its theme, so
+  there is nothing here to composite against without hard-coding a guess that
+  is wrong on the other theme. Nothing this plugin writes is affected —
+  `normalizeColor` only ever emits opaque 3/6-digit hex — so only out-of-band
+  values change, for which falling back is already the established answer.
+  An alpha-carrying hex is now settled before the `CSS.supports` branch,
+  closing a related gap where a host with no `CSS` object let `#ffffff00`
+  through untouched. Three regression tests added; all three fail against the
+  previous implementation. (commit pending — see below)
 
 ## Action required by author
 
@@ -49,18 +67,11 @@ unreleased version.
   below the 3.0 contrast floor: `#eab308` yellow (1.92), `#22c55e` green (2.28),
   `#f97316` orange (2.80). The other four palette colours and `DEFAULT_COLOR`
   are unchanged. Already recorded in `CHANGELOG.md` under `0.5.5`.
-- **Open blocker — partially transparent backgrounds still get unreadable
-  text.** `ui/bundle.js:299` (`relativeLuminance`) ignores alpha, and
-  `renderableColor` (`ui/bundle.js:372`) only rejects `a === 0`. A background
-  with `0 < a < 1` is therefore measured as if it were opaque, so the same
-  invisible-chip bug this branch closes stays open by degree. Verified against
-  this commit: `chipStyle("#00000019")` returns background `#00000019` with
-  text `#ffffff` — a 10%-opaque black chip (≈ `#e6e6e6` over a light card)
-  carrying white text, contrast ≈ 1.2. Reachable by the same route QA used for
-  `"transparent"` and `"currentcolor"`: PUT the colour straight into the
-  `tags-catalog` user-state key. Left unfixed deliberately — the two defensible
-  fixes (reject `a < 1` outright, consistent with the existing `a === 0` rule
-  and with `normalizeColor` only ever writing opaque hex; or composite over an
-  assumed backdrop, which this plugin cannot know since the chip's surface is
-  host-theme-dependent) trade off differently and change documented
-  user-visible rendering, so the choice belongs to the author.
+- **A translucent tag colour now renders gray.** Any catalog colour with
+  `0 < alpha < 1` falls back to `DEFAULT_COLOR` rather than rendering
+  semi-transparent (see the alpha entry above). This cannot arise from the
+  plugin's own picker, which only writes opaque hex, but an imported or
+  hand-written catalog holding e.g. `rgba(59,130,246,0.9)` will show gray
+  chips for that tag instead of a slightly transparent blue. Worth a line in
+  the PR description alongside the palette flip. Recorded in `CHANGELOG.md`
+  under `0.5.5`.
