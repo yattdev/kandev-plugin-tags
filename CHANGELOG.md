@@ -1,6 +1,10 @@
 # Changelog
 
-## [0.5.4] - 2026-08-12
+## [0.5.5] - 2026-08-12
+
+(0.5.4 is taken by `feature/fix-tag-display-and-e00`, the branch this one is
+stacked on, which bumped to it independently while this branch was open. Its
+entry lands here when that branch merges first.)
 
 ### Fixed
 
