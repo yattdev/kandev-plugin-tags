@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.5.0] - 2026-08-12
+
+### Changed
+
+- **Tag names are now capped at 22 characters (was 32), and the Tags box is
+  380px wide (was 320px).** These two are one budget: the Create input gets
+  whatever the fixed-width box has left after its padding and the Create
+  button. At 320px that was 222px of input, but a 32-character name needs
+  ~253px for ordinary lowercase and ~373px for the widest glyphs -- so the
+  input scrolled horizontally for most full-length names, which is the bug
+  this was meant to fix. No box width makes "32 characters, never scrolls"
+  true at a sensible size; 22 characters in 282px of input does. A tag whose
+  stored name is already longer than 22 characters still renders in full --
+  only creating or renaming past the cap is refused.
+- The box's width is now an inline style rather than a `w-[320px]` class.
+  Tailwind only emits an arbitrary-value utility for literals it finds in
+  source it scans, and the host does not scan this bundle -- the old class
+  resolved only because unrelated host components happened to use the same
+  literal, which is not a dependency this plugin should have.
+
 ## [0.4.1] - 2026-08-11
 
 ### Fixed

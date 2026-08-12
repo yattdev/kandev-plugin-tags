@@ -16,7 +16,7 @@
  *   - a "main-top-bar" slot button ("Tags box") that opens a
  *     filter+manage dropdown (TagsTopBarDropdown) to add/rename/recolor/
  *     remove tags from the user's tag catalog: an icon-lg trigger, a
- *     320px-wide grid-aligned tag list (a stable delete-button column
+ *     380px-wide grid-aligned tag list (a stable delete-button column
  *     regardless of tag name length), and a swatch-button color picker
  *     with palette/hex swatches, a live preview, and explicit Update/
  *     Cancel commit buttons (no write until Update);
@@ -65,7 +65,28 @@
   var CATALOG_KEY = "tags-catalog";
   var TASK_SCOPE = "task";
   var TASK_KEY = "tags";
-  var MAX_TAG_LENGTH = 32;
+  // 22, not 32: the Tags box is a fixed-width dropdown, so the Create input's
+  // width is whatever the box has left after its padding and the Create
+  // button -- 282px at TOPBAR_WIDTH. A 32-character name needs ~253px of that
+  // for ordinary lowercase and ~373px in the worst case (all wide glyphs), so
+  // "32 characters, no horizontal scroll" was not satisfiable at any sane box
+  // width. At 22 the worst case is 262px, which the box is now sized to hold.
+  var MAX_TAG_LENGTH = 22;
+
+  // Tags box geometry. These three are one budget, so they live together:
+  //   input = TOPBAR_WIDTH - 16 (p-2) - 16 (row padding) - CREATE_BUTTON_WIDTH
+  //           - 6 (gap)  =  282px
+  // which is what a 22-character name needs at its widest. Changing any of
+  // them without re-checking MAX_TAG_LENGTH reintroduces the horizontal
+  // scroll (see the regression test in ui/bundle.test.js).
+  //
+  // Applied as an inline width rather than a `w-[360px]` class on purpose:
+  // Tailwind only emits an arbitrary-value utility if it appears in source it
+  // scans, and the host does not scan this bundle. `w-[320px]` happened to
+  // work only because unrelated host components used the same literal, which
+  // is not a dependency this plugin should have.
+  var TOPBAR_WIDTH = 380;
+  var CREATE_BUTTON_WIDTH = 60;
   var MAX_TAGS_PER_TASK = 12;
   var CONFLICT_RETRY_LIMIT = 1;
   var UNTAGGED_FILTER_VALUE = "__untagged__";
@@ -1479,7 +1500,12 @@
         jsx(ui.DropdownMenuTrigger, { asChild: true }, triggerButton),
         jsx(
           ui.DropdownMenuContent,
-          { align: "end", className: "w-[320px] p-2", "data-testid": "kandev-tags-topbar-content" },
+          {
+            align: "end",
+            className: "p-2",
+            style: { width: TOPBAR_WIDTH + "px" },
+            "data-testid": "kandev-tags-topbar-content",
+          },
           jsx(
             "div",
             { className: "text-muted-foreground text-xs px-2 py-1.5" },
@@ -1495,9 +1521,11 @@
               placeholder: "New tag name…",
               maxLength: MAX_TAG_LENGTH,
               // flex:1/minWidth:0 so the input can grow to fill the box's
-              // full 320px width -- a 32-char name must fit with no
+              // full width -- a MAX_TAG_LENGTH-char name must fit with no
               // horizontal scroll -- while the Create button (below) keeps
               // a fixed width instead of being squeezed by a long name.
+              // The budget: TOPBAR_WIDTH - 16 (p-2) - 16 (row padding)
+              // - CREATE_BUTTON_WIDTH - 6 (gap) = 262px of input.
               style: { flex: 1, minWidth: 0, height: "28px" },
               onChange: function (e) {
                 setDraft(e.target.value);
@@ -1513,7 +1541,7 @@
                 size: "sm",
                 "data-testid": "kandev-tags-topbar-create",
                 disabled: !canCreate,
-                style: { flexShrink: 0, width: "60px" },
+                style: { flexShrink: 0, width: CREATE_BUTTON_WIDTH + "px" },
                 onClick: handleCreate,
               },
               "Create",
@@ -1938,6 +1966,8 @@
       sanitizeCatalog: sanitizeCatalog,
       MAX_TAG_LENGTH: MAX_TAG_LENGTH,
       MAX_TAGS_PER_TASK: MAX_TAGS_PER_TASK,
+      TOPBAR_WIDTH: TOPBAR_WIDTH,
+      CREATE_BUTTON_WIDTH: CREATE_BUTTON_WIDTH,
       PALETTE: PALETTE,
       DEFAULT_COLOR: DEFAULT_COLOR,
       UNTAGGED_FILTER_VALUE: UNTAGGED_FILTER_VALUE,

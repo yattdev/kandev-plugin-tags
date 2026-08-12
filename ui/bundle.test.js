@@ -69,7 +69,7 @@ test("normalizeName rejects an empty or whitespace-only string", () => {
 
 test("normalizeName rejects a name over MAX_TAG_LENGTH characters", () => {
   const { normalizeName, MAX_TAG_LENGTH } = loadBundle().__internal;
-  assert.equal(MAX_TAG_LENGTH, 32);
+  assert.equal(MAX_TAG_LENGTH, 22);
   assert.equal(normalizeName("a".repeat(MAX_TAG_LENGTH)), "a".repeat(MAX_TAG_LENGTH));
   assert.equal(normalizeName("a".repeat(MAX_TAG_LENGTH + 1)), null);
 });
@@ -1632,7 +1632,7 @@ test("TagsTopBarDropdown: clicking a tag's pill enters rename mode; committing r
 // and the swatch-button + Update/Cancel color picker redesign.
 // -----------------------------------------------------------------------
 
-test("Tags box trigger uses size icon-lg and the dropdown content is 320px wide", async () => {
+test("Tags box trigger uses size icon-lg and the dropdown content is TOPBAR_WIDTH wide", async () => {
   const plugin = loadBundle();
   const { makeTagsTopBarDropdown } = plugin.__internal;
   const fakeHost = makeFakeReactHost();
@@ -1649,7 +1649,37 @@ test("Tags box trigger uses size icon-lg and the dropdown content is 320px wide"
   assert.equal(trigger.props.size, "icon-lg");
 
   const content = tree.children[1];
-  assert.match(content.props.className, /(^|\s)w-\[320px\](\s|$)/);
+  const { TOPBAR_WIDTH } = plugin.__internal;
+  // An inline width, not a `w-[...]` class: Tailwind only emits an
+  // arbitrary-value utility for literals it finds in source it scans, and the
+  // host does not scan this bundle (see the TOPBAR_WIDTH comment).
+  assert.equal(content.props.style.width, TOPBAR_WIDTH + "px");
+  assert.doesNotMatch(content.props.className, /w-\[/);
+});
+
+test("Tags box: a full-length tag name fits the Create input with no horizontal scroll", () => {
+  // Regression test for the QA finding: the box was 320px with a 32-character
+  // limit, which left 222px of input for a name needing up to ~373px, so an
+  // ordinary 32-character name scrolled horizontally. The three constants are
+  // one budget; this asserts the budget still closes.
+  const { MAX_TAG_LENGTH, TOPBAR_WIDTH, CREATE_BUTTON_WIDTH } = loadBundle().__internal;
+
+  const BOX_PADDING = 16; // p-2, both sides
+  const ROW_PADDING = 16; // the Create row's `padding: "4px 8px"`, both sides
+  const GAP = 6; // the Create row's flex gap
+  const inputWidth = TOPBAR_WIDTH - BOX_PADDING - ROW_PADDING - CREATE_BUTTON_WIDTH - GAP;
+
+  // Widest glyph in the input's font measured ~11.66px in Chrome at the
+  // Tags box's font-size; 12 is a deliberately pessimistic bound so this
+  // fails before a real user can produce a scrollbar.
+  const WORST_CASE_PX_PER_CHAR = 12;
+  const worstCaseName = MAX_TAG_LENGTH * WORST_CASE_PX_PER_CHAR;
+
+  assert.ok(
+    worstCaseName <= inputWidth,
+    `a ${MAX_TAG_LENGTH}-char name needs up to ${worstCaseName}px but the Create input is only ${inputWidth}px ` +
+      `(TOPBAR_WIDTH=${TOPBAR_WIDTH}, CREATE_BUTTON_WIDTH=${CREATE_BUTTON_WIDTH}) — it would scroll horizontally`,
+  );
 });
 
 test("Tags box: the Create row's input can grow (flex:1, minWidth:0) and the Create button has a fixed width", async () => {

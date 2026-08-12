@@ -23,7 +23,7 @@ user's tags and tag catalog are private and never shown to teammates.
   existing colored tags rendered as pills -- click a row to apply/remove it
   from this card; applied tags show a checkmark.
 - **Filter and manage from one place**: an icon-lg filter-icon button in
-  the app's top bar opens the Tags box, a 320px-wide dropdown listing your
+  the app's top bar opens the Tags box, a 380px-wide dropdown listing your
   whole tag catalog as grid-aligned rows (color swatch, name pill, delete
   button in a fixed-width column so it lines up identically regardless of
   the tag's name length), with its own **Create** input above the list
@@ -46,7 +46,7 @@ user's tags and tag catalog are private and never shown to teammates.
   recoloring, renaming, and deleting stay available here regardless of tier.
 - **Remove a tag from a card**: click the `x` on a chip on the card itself,
   or click it off in the Add tag modal.
-- Tag names are trimmed, capped at 32 characters, deduplicated
+- Tag names are trimmed, capped at 22 characters, deduplicated
   case-insensitively within your catalog; each card is capped at 12 applied
   tags. Deleting a tag leaves any card that still carried it (a rare race
   with the cascade removal above) showing no chip for it at all, rather
