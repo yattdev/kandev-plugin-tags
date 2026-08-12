@@ -61,6 +61,51 @@ function makeFakeConsole() {
   return { console: { error: (...args) => calls.error.push(args) }, calls };
 }
 
+/**
+ * A fake `document` whose `canvas.getContext("2d")` mimics the subset of a
+ * real browser's `fillStyle` normalization that resolveRgb's canvas branch
+ * depends on: hex echoes back unchanged (so the sentinel dance in
+ * resolveRgbViaCanvas works), `transparent`/`rgba()`/`hsla()` normalize to
+ * `rgba(r, g, b, a)`, and anything unrecognized (`currentcolor`, garbage)
+ * is rejected -- fillStyle keeps its prior value, exactly as a canvas
+ * silently ignoring an invalid CSS colour would.
+ */
+function makeFakeColorDocument() {
+  function resolve(value) {
+    const v = String(value).trim().toLowerCase();
+    if (/^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/.test(v)) return v;
+    if (v === "transparent") return "rgba(0, 0, 0, 0)";
+    const rgba = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(v);
+    if (rgba) {
+      const a = rgba[4] !== undefined ? parseFloat(rgba[4]) : 1;
+      return `rgba(${rgba[1]}, ${rgba[2]}, ${rgba[3]}, ${a})`;
+    }
+    const hsla = /^hsla?\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(v);
+    if (hsla) {
+      const l = parseFloat(hsla[3]);
+      const a = hsla[4] !== undefined ? parseFloat(hsla[4]) : 1;
+      // These tests only exercise l === 0 (pure black) -- full HSL->RGB
+      // conversion isn't needed for that case.
+      if (l === 0) return `rgba(0, 0, 0, ${a})`;
+    }
+    return null; // rejected, matching a real canvas ignoring an invalid value
+  }
+  let fillStyleValue = "#000000";
+  return {
+    createElement: () => ({
+      getContext: () => ({
+        get fillStyle() {
+          return fillStyleValue;
+        },
+        set fillStyle(v) {
+          const resolved = resolve(v);
+          if (resolved !== null) fillStyleValue = resolved;
+        },
+      }),
+    }),
+  };
+}
+
 // -----------------------------------------------------------------------
 // normalizeName / normalizeColor
 // -----------------------------------------------------------------------
@@ -145,9 +190,126 @@ test("chip styles never emit an unrenderable background", () => {
   assert.equal(chipStyle("not-a-colour").background, DEFAULT_COLOR);
   assert.equal(denseChipStyle("not-a-colour").background, DEFAULT_COLOR);
   // The paired text colour is what makes a bad background unreadable.
-  assert.equal(chipStyle("not-a-colour").color, "#fff");
+  // DEFAULT_COLOR is gray-500, which reads fine in light text.
+  assert.equal(chipStyle("not-a-colour").color, "#ffffff");
   // Hex still passes through untouched with a parser that rejects everything.
   assert.equal(chipStyle("#ef4444").background, "#ef4444");
+});
+
+// -----------------------------------------------------------------------
+// resolveRgb / relativeLuminance / contrastRatio / chipTextColor
+// -----------------------------------------------------------------------
+
+test("resolveRgb parses hex without needing a document", () => {
+  const { resolveRgb } = loadBundle().__internal;
+  assertStructural.deepEqual(resolveRgb("#f00"), { r: 255, g: 0, b: 0, a: 1 });
+  assertStructural.deepEqual(resolveRgb("#ff0000"), { r: 255, g: 0, b: 0, a: 1 });
+  assertStructural.deepEqual(resolveRgb("#ff000080"), { r: 255, g: 0, b: 0, a: 128 / 255 });
+  assertStructural.deepEqual(resolveRgb("#f008"), { r: 255, g: 0, b: 0, a: 136 / 255 });
+});
+
+test("resolveRgb returns null for a non-hex value with no document present", () => {
+  const { resolveRgb } = loadBundle().__internal;
+  assert.equal(resolveRgb("red"), null);
+  assert.equal(resolveRgb("transparent"), null);
+  assert.equal(resolveRgb("currentcolor"), null);
+  assert.equal(resolveRgb(null), null);
+});
+
+test("resolveRgb resolves non-hex colours via a probe canvas when a document is present", () => {
+  const document = makeFakeColorDocument();
+  const { resolveRgb } = loadBundle(null, { document }).__internal;
+  assertStructural.deepEqual(resolveRgb("transparent"), { r: 0, g: 0, b: 0, a: 0 });
+  // currentcolor has no element context to resolve against -- a real canvas
+  // rejects it outright, and resolveRgb must report that as unresolvable
+  // rather than a resolved colour.
+  assert.equal(resolveRgb("currentcolor"), null);
+});
+
+test("contrastRatio of white vs black is 21, and a colour against itself is 1", () => {
+  const { contrastRatio } = loadBundle().__internal;
+  assert.ok(Math.abs(contrastRatio("#ffffff", "#000000") - 21) < 0.01);
+  assert.ok(Math.abs(contrastRatio("#000000", "#ffffff") - 21) < 0.01);
+  assert.equal(contrastRatio("#3b82f6", "#3b82f6"), 1);
+  assert.equal(contrastRatio("#6b7280", "#6b7280"), 1);
+});
+
+test("chipTextColor picks dark text for pale/low-contrast backgrounds, white otherwise", () => {
+  const { chipTextColor } = loadBundle().__internal;
+  // Yellow, green, orange: unreadable in white today (report's D2 table).
+  assert.equal(chipTextColor("#eab308"), "#111827");
+  assert.equal(chipTextColor("#22c55e"), "#111827");
+  assert.equal(chipTextColor("#f97316"), "#111827");
+  // The pale colour named in the report.
+  assert.equal(chipTextColor("#ffffe0"), "#111827");
+  // The remaining palette entries plus DEFAULT_COLOR stay white.
+  assert.equal(chipTextColor("#ef4444"), "#ffffff");
+  assert.equal(chipTextColor("#3b82f6"), "#ffffff");
+  assert.equal(chipTextColor("#a855f7"), "#ffffff");
+  assert.equal(chipTextColor("#ec4899"), "#ffffff");
+  assert.equal(chipTextColor("#6b7280"), "#ffffff");
+});
+
+test("every PALETTE colour plus DEFAULT_COLOR clears the contrast floor on both chip surfaces", () => {
+  const { chipStyle, denseChipStyle, contrastRatio, PALETTE, DEFAULT_COLOR } = loadBundle().__internal;
+  const colours = PALETTE.concat([DEFAULT_COLOR]);
+  for (const c of colours) {
+    const chip = chipStyle(c);
+    const dense = denseChipStyle(c);
+    assert.ok(
+      contrastRatio(chip.background, chip.color) >= 3,
+      `chipStyle(${c}) contrast ${contrastRatio(chip.background, chip.color)} below 3.0`,
+    );
+    assert.ok(
+      contrastRatio(dense.background, dense.color) >= 3,
+      `denseChipStyle(${c}) contrast ${contrastRatio(dense.background, dense.color)} below 3.0`,
+    );
+  }
+});
+
+// Regression: a fully-transparent background -- reachable via "transparent",
+// "rgba(0,0,0,0)", an 8-digit hex with a zero alpha byte, or "hsla(...,0)" --
+// paired white text renders an invisible chip name. renderableColor must
+// treat alpha-zero as unrenderable, same as an unparseable value.
+test("renderableColor falls back to DEFAULT_COLOR for a fully-transparent colour", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { renderableColor, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
+  assert.equal(renderableColor("rgba(0,0,0,0)"), DEFAULT_COLOR);
+  // #ffffff00 resolves via the hex fast path and needs no document at all.
+  assert.equal(renderableColor("#ffffff00"), DEFAULT_COLOR);
+  assert.equal(renderableColor("hsla(0,0%,0%,0)"), DEFAULT_COLOR);
+});
+
+// "currentcolor" resolves to the chip's own (white) text colour, so a chip
+// backed by it renders white-on-white. A real canvas rejects it outright
+// (no element context to resolve against) -- with a parser AND a document
+// available, that rejection must fall back rather than pass through as a
+// "legitimate named colour".
+test("renderableColor falls back to DEFAULT_COLOR for currentcolor when a parser is available", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { renderableColor, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
+  assert.equal(renderableColor("currentcolor"), DEFAULT_COLOR);
+});
+
+// The regression case from the report: a transparent chip renders invisible
+// on the light theme. Both chip surfaces must fall back to a legible gray
+// chip, and DEFAULT_COLOR reads fine in white text.
+test("chip styles fall back to a legible chip for a transparent background (AC1)", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { chipStyle, denseChipStyle, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
+  assert.equal(chipStyle("transparent").background, DEFAULT_COLOR);
+  assert.equal(chipStyle("transparent").color, "#ffffff");
+  assert.equal(denseChipStyle("transparent").background, DEFAULT_COLOR);
+  assert.equal(denseChipStyle("transparent").color, "#ffffff");
+});
+
+test("chipStyle is unchanged for a colour that already reads fine (AC8)", () => {
+  const { chipStyle } = loadBundle().__internal;
+  assert.equal(chipStyle("#ef4444").background, "#ef4444");
+  assert.equal(chipStyle("#ef4444").color, "#ffffff");
 });
 
 // -----------------------------------------------------------------------

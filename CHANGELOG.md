@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.4] - 2026-08-12
+
+### Fixed
+
+- Tag chips no longer hard-code white text: `chipStyle`/`denseChipStyle` now
+  pick between white and a dark (`#111827`) token from the resolved
+  background's WCAG contrast ratio, falling back to white only when the
+  background can't be resolved. Three palette colours flip to dark text as
+  a result -- `#eab308` yellow, `#22c55e` green, `#f97316` orange -- because
+  white on them fell below the 3.0 contrast floor (1.92 / 2.28 / 2.80); the
+  other four palette colours and `DEFAULT_COLOR` are unchanged.
+- `renderableColor` now also rejects a background that resolves to fully
+  transparent -- `"transparent"`, `"rgba(0,0,0,0)"`, an 8-digit hex with a
+  zero alpha byte, `"hsla(...,0)"` -- and, given a real DOM to resolve
+  against, a value like `"currentcolor"` that CSS accepts but that can't be
+  reduced to concrete RGB. Both fall back to `DEFAULT_COLOR`, same as an
+  unparseable value already did.
+
 ## [0.5.3] - 2026-08-12
 
 (0.5.2 was installed on a test host during review and then withdrawn, so

@@ -126,6 +126,18 @@
 
   var HEX_COLOR_RE = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i;
 
+  // Chip text tokens (Tailwind white / gray-900) and the WCAG contrast floor
+  // a background must clear to keep white text -- see chipTextColor.
+  var CHIP_TEXT_LIGHT = "#ffffff";
+  var CHIP_TEXT_DARK = "#111827";
+  var CHIP_TEXT_MIN_CONTRAST = 3;
+
+  // 3/4/6/8-digit hex, the 4/8-digit forms carrying an alpha channel --
+  // wider than HEX_COLOR_RE (which only covers what normalizeColor writes)
+  // because resolveRgb also has to measure alpha on values that arrive by
+  // other routes (imports, legacy catalogs, host.storage).
+  var HEX_RGBA_RE = /^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+
   var CHIP_ROW_STYLE = { display: "flex", flexWrap: "wrap", gap: "4px", alignItems: "center" };
   var CHIP_REMOVE_BUTTON_STYLE = {
     display: "inline-flex",
@@ -153,23 +165,158 @@
     flexShrink: 0,
   };
 
+  var resolveRgbCache = new Map();
+  var probeCanvasCtx; // lazily created 2D context, browser hosts only
+
+  function hexChannel(pair) {
+    return parseInt(pair.length === 1 ? pair + pair : pair, 16);
+  }
+
+  /** Parses a 3/4/6/8-digit `#`-prefixed hex string (already RE-validated) to {r,g,b,a}. */
+  function parseHexRgb(hex) {
+    var digits = hex.slice(1);
+    if (digits.length === 3 || digits.length === 4) {
+      return {
+        r: hexChannel(digits[0]),
+        g: hexChannel(digits[1]),
+        b: hexChannel(digits[2]),
+        a: digits.length === 4 ? hexChannel(digits[3]) / 255 : 1,
+      };
+    }
+    return {
+      r: hexChannel(digits.slice(0, 2)),
+      g: hexChannel(digits.slice(2, 4)),
+      b: hexChannel(digits.slice(4, 6)),
+      a: digits.length === 8 ? hexChannel(digits.slice(6, 8)) / 255 : 1,
+    };
+  }
+
+  /** Parses a canvas-normalised `#rrggbb` or `rgba(r, g, b, a)` string to {r,g,b,a}. */
+  function parseCanvasColor(value) {
+    if (typeof value !== "string") return null;
+    if (HEX_RGBA_RE.test(value)) return parseHexRgb(value);
+    var m = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/i.exec(value);
+    if (!m) return null;
+    return {
+      r: parseFloat(m[1]),
+      g: parseFloat(m[2]),
+      b: parseFloat(m[3]),
+      a: m[4] !== undefined ? parseFloat(m[4]) : 1,
+    };
+  }
+
   /**
-   * A background colour safe to render a white-on-colour chip with.
+   * Resolves a non-hex colour to concrete RGB by asking a real browser: a
+   * lazily created, module-level probe canvas normalises whatever it's
+   * handed to `#rrggbb` (opaque) or `rgba(r, g, b, a)` (translucent) --
+   * rejecting values it can't parse, including `currentcolor` (no element
+   * context). Two distinct sentinels are assigned before `raw` so an
+   * unaccepted assignment (fillStyle silently left at the prior value) can
+   * be told apart from `raw` legitimately resolving to that same colour.
+   * `null` with no `document` (the DOM-less test host) or on any failure.
+   */
+  function resolveRgbViaCanvas(raw) {
+    if (typeof document === "undefined") return null;
+    try {
+      if (!probeCanvasCtx) {
+        var canvas = document.createElement("canvas");
+        probeCanvasCtx = canvas && typeof canvas.getContext === "function" ? canvas.getContext("2d") : null;
+      }
+      if (!probeCanvasCtx) return null;
+      var SENTINEL_A = "#010203";
+      var SENTINEL_B = "#fdfeff";
+      probeCanvasCtx.fillStyle = SENTINEL_A;
+      probeCanvasCtx.fillStyle = SENTINEL_B;
+      probeCanvasCtx.fillStyle = raw;
+      var resolved = probeCanvasCtx.fillStyle;
+      if (resolved === SENTINEL_B) return null; // rejected: fillStyle held its prior value
+      return parseCanvasColor(resolved);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * Resolves `raw` to concrete `{ r, g, b, a }` channels (0-255, alpha
+   * 0-1), or `null` if it can't be resolved. Hex is parsed directly -- the
+   * only shape this plugin itself ever writes, so the DOM-less test host
+   * measures contrast with no stubbing -- and everything else goes through
+   * `resolveRgbViaCanvas`, memoised since chipStyle/denseChipStyle call
+   * this once per chip per render.
+   */
+  function resolveRgb(raw) {
+    if (typeof raw !== "string") return null;
+    var trimmed = raw.trim();
+    if (HEX_RGBA_RE.test(trimmed)) return parseHexRgb(trimmed);
+    if (resolveRgbCache.has(trimmed)) return resolveRgbCache.get(trimmed);
+    var resolved = resolveRgbViaCanvas(trimmed);
+    resolveRgbCache.set(trimmed, resolved);
+    return resolved;
+  }
+
+  /** WCAG sRGB companding for one 0-255 channel. */
+  function srgbChannel(channel) {
+    var c = channel / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  }
+
+  /** WCAG relative luminance of an {r,g,b} object (alpha ignored -- callers resolve alpha upstream). */
+  function relativeLuminance(rgb) {
+    return 0.2126 * srgbChannel(rgb.r) + 0.7152 * srgbChannel(rgb.g) + 0.0722 * srgbChannel(rgb.b);
+  }
+
+  /**
+   * WCAG contrast ratio between two colours (1 to 21). Either side failing
+   * to resolve (an unparseable value passed directly rather than through
+   * renderableColor) yields 1 -- the safest ("no contrast") answer rather
+   * than throwing.
+   */
+  function contrastRatio(a, b) {
+    var rgbA = resolveRgb(a);
+    var rgbB = resolveRgb(b);
+    if (!rgbA || !rgbB) return 1;
+    var lumA = relativeLuminance(rgbA);
+    var lumB = relativeLuminance(rgbB);
+    var lighter = Math.max(lumA, lumB);
+    var darker = Math.min(lumA, lumB);
+    return (lighter + 0.05) / (darker + 0.05);
+  }
+
+  /**
+   * The chip text colour to pair with `background`: white unless its
+   * contrast ratio against white falls below CHIP_TEXT_MIN_CONTRAST (3.0,
+   * WCAG AA for graphical objects), in which case the dark token. An
+   * unresolvable background gets white, matching the pre-contrast default.
+   */
+  function chipTextColor(background) {
+    if (!resolveRgb(background)) return CHIP_TEXT_LIGHT;
+    return contrastRatio(background, CHIP_TEXT_LIGHT) >= CHIP_TEXT_MIN_CONTRAST ? CHIP_TEXT_LIGHT : CHIP_TEXT_DARK;
+  }
+
+  /**
+   * A background colour safe to render a chip with -- resolvable to
+   * concrete, visible RGB, or DEFAULT_COLOR.
    *
    * `sanitizeCatalog` accepts any string as a tag's `color` (it only checks
    * the type), while `normalizeColor` guards the *write* path -- so a value
    * that never went through this plugin's UI can reach the DOM unvalidated.
-   * The browser then drops the whole declaration, leaving a transparent
-   * background behind chipStyle's hard-coded `color: "#fff"`: a chip whose
-   * name is invisible on the light theme.
+   * Two ways that goes wrong: the browser drops an unparseable declaration
+   * entirely, leaving a transparent background; or the declaration parses
+   * fine but resolves to fully transparent (`"transparent"`,
+   * `"rgba(0,0,0,0)"`, an 8-digit hex with a zero alpha byte). Either way
+   * the chip becomes invisible against whatever text colour pairs with it.
    *
    * Hex passes immediately (the only shape this plugin writes). Anything
-   * else is asked of the browser's own parser rather than rejected, because
-   * a named or functional colour -- `"red"`, `"rgb(1 2 3)"` -- is a
-   * legitimate value an older catalog or an import may hold, and those
-   * render correctly today. Where there is no parser (the DOM-less test
-   * host) the value passes through, matching the previous behaviour instead
-   * of silently recolouring tags in a context that renders nothing anyway.
+   * else is asked of the browser's own parser: a named or functional
+   * colour -- `"red"`, `"rgb(1 2 3)"` -- is a legitimate value an older
+   * catalog or an import may hold. But surviving `CSS.supports` is not
+   * enough on its own -- a value the browser *accepts* can still resolve to
+   * fully transparent, or (given a parser) to nothing `resolveRgb` can turn
+   * into concrete RGB at all (`"currentcolor"`, `var(--x)`) -- either of
+   * which now falls back to DEFAULT_COLOR too. Where there is no parser
+   * (the DOM-less test host) the value passes through unchecked, matching
+   * the previous behaviour instead of silently recolouring tags in a
+   * context that renders nothing anyway.
    */
   function renderableColor(raw) {
     if (typeof raw !== "string") return DEFAULT_COLOR;
@@ -177,20 +324,33 @@
     if (trimmed === "") return DEFAULT_COLOR;
     if (HEX_COLOR_RE.test(trimmed)) return trimmed;
     if (typeof CSS !== "undefined" && CSS && typeof CSS.supports === "function") {
-      return CSS.supports("color", trimmed) ? trimmed : DEFAULT_COLOR;
+      if (!CSS.supports("color", trimmed)) return DEFAULT_COLOR;
+      var rgb = resolveRgb(trimmed);
+      // A resolved-but-fully-transparent value (e.g. an 8-digit hex, which
+      // resolveRgb parses with no document needed) is unrenderable either way.
+      if (rgb !== null && rgb.a === 0) return DEFAULT_COLOR;
+      // A `null` resolution is only conclusive when there was a real DOM to
+      // resolve against -- with no `document` (the DOM-less test host),
+      // resolveRgb can't tell "currentcolor" apart from an ordinary named
+      // colour it simply has no browser to ask, so this stays permissive
+      // and matches the pre-contrast behaviour instead of blanket-rejecting
+      // every non-hex value the moment a CSS stub is injected.
+      if (rgb === null && typeof document !== "undefined") return DEFAULT_COLOR;
+      return trimmed;
     }
     return trimmed;
   }
 
   function chipStyle(color) {
+    var background = renderableColor(color);
     return {
       display: "inline-flex",
       alignItems: "center",
       gap: "4px",
       padding: "1px 7px",
       borderRadius: "999px",
-      background: renderableColor(color),
-      color: "#fff",
+      background: background,
+      color: chipTextColor(background),
       fontSize: "11px",
       fontWeight: 500,
       whiteSpace: "nowrap",
@@ -198,13 +358,14 @@
   }
 
   function denseChipStyle(color) {
+    var background = renderableColor(color);
     return {
       display: "inline-flex",
       alignItems: "center",
       padding: "0px 5px",
       borderRadius: "999px",
-      background: renderableColor(color),
-      color: "#fff",
+      background: background,
+      color: chipTextColor(background),
       fontSize: "10px",
       fontWeight: 500,
       whiteSpace: "nowrap",
@@ -2006,6 +2167,10 @@
       renderableColor: renderableColor,
       chipStyle: chipStyle,
       denseChipStyle: denseChipStyle,
+      resolveRgb: resolveRgb,
+      relativeLuminance: relativeLuminance,
+      contrastRatio: contrastRatio,
+      chipTextColor: chipTextColor,
       MAX_TAG_LENGTH: MAX_TAG_LENGTH,
       MAX_TAGS_PER_TASK: MAX_TAGS_PER_TASK,
       TOPBAR_WIDTH: TOPBAR_WIDTH,
