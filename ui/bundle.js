@@ -210,9 +210,13 @@
    * lazily created, module-level probe canvas normalises whatever it's
    * handed to `#rrggbb` (opaque) or `rgba(r, g, b, a)` (translucent) --
    * rejecting values it can't parse, including `currentcolor` (no element
-   * context). Two distinct sentinels are assigned before `raw` so an
-   * unaccepted assignment (fillStyle silently left at the prior value) can
-   * be told apart from `raw` legitimately resolving to that same colour.
+   * context). `raw` is assigned twice, once after each of two distinct
+   * sentinels: a rejected assignment leaves fillStyle at whichever sentinel
+   * preceded it, so the two reads disagree, while an accepted one lands on
+   * the same colour both times. Comparing a single read against one
+   * sentinel would instead reject any `raw` that legitimately resolves to
+   * that sentinel's colour (`"rgb(253, 254, 255)"` normalises to
+   * `#fdfeff`), recolouring a perfectly renderable tag to DEFAULT_COLOR.
    * `null` with no `document` (the DOM-less test host) or on any failure.
    */
   function resolveRgbViaCanvas(raw) {
@@ -226,11 +230,13 @@
       var SENTINEL_A = "#010203";
       var SENTINEL_B = "#fdfeff";
       probeCanvasCtx.fillStyle = SENTINEL_A;
+      probeCanvasCtx.fillStyle = raw;
+      var afterA = probeCanvasCtx.fillStyle;
       probeCanvasCtx.fillStyle = SENTINEL_B;
       probeCanvasCtx.fillStyle = raw;
-      var resolved = probeCanvasCtx.fillStyle;
-      if (resolved === SENTINEL_B) return null; // rejected: fillStyle held its prior value
-      return parseCanvasColor(resolved);
+      var afterB = probeCanvasCtx.fillStyle;
+      if (afterA !== afterB) return null; // rejected: fillStyle held each prior value
+      return parseCanvasColor(afterA);
     } catch (e) {
       return null;
     }
@@ -2168,7 +2174,6 @@
       chipStyle: chipStyle,
       denseChipStyle: denseChipStyle,
       resolveRgb: resolveRgb,
-      relativeLuminance: relativeLuminance,
       contrastRatio: contrastRatio,
       chipTextColor: chipTextColor,
       MAX_TAG_LENGTH: MAX_TAG_LENGTH,

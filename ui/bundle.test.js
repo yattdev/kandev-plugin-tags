@@ -65,12 +65,18 @@ function makeFakeConsole() {
  * A fake `document` whose `canvas.getContext("2d")` mimics the subset of a
  * real browser's `fillStyle` normalization that resolveRgb's canvas branch
  * depends on: hex echoes back unchanged (so the sentinel dance in
- * resolveRgbViaCanvas works), `transparent`/`rgba()`/`hsla()` normalize to
- * `rgba(r, g, b, a)`, and anything unrecognized (`currentcolor`, garbage)
- * is rejected -- fillStyle keeps its prior value, exactly as a canvas
- * silently ignoring an invalid CSS colour would.
+ * resolveRgbViaCanvas works), an *opaque* colour normalizes to `#rrggbb`
+ * and a translucent one to `rgba(r, g, b, a)` -- which is what a real
+ * canvas does, and the reason resolveRgbViaCanvas cannot tell a rejected
+ * assignment from an accepted one by comparing against a single sentinel --
+ * and anything unrecognized (`currentcolor`, garbage) is rejected --
+ * fillStyle keeps its prior value, exactly as a canvas silently ignoring an
+ * invalid CSS colour would.
  */
 function makeFakeColorDocument() {
+  const hex2 = (n) => Math.round(Number(n)).toString(16).padStart(2, "0");
+  /** Canvas normalization: `#rrggbb` when fully opaque, `rgba(...)` otherwise. */
+  const normalize = (r, g, b, a) => (a === 1 ? `#${hex2(r)}${hex2(g)}${hex2(b)}` : `rgba(${r}, ${g}, ${b}, ${a})`);
   function resolve(value) {
     const v = String(value).trim().toLowerCase();
     if (/^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/.test(v)) return v;
@@ -78,7 +84,7 @@ function makeFakeColorDocument() {
     const rgba = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(v);
     if (rgba) {
       const a = rgba[4] !== undefined ? parseFloat(rgba[4]) : 1;
-      return `rgba(${rgba[1]}, ${rgba[2]}, ${rgba[3]}, ${a})`;
+      return normalize(rgba[1], rgba[2], rgba[3], a);
     }
     const hsla = /^hsla?\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(v);
     if (hsla) {
@@ -86,7 +92,7 @@ function makeFakeColorDocument() {
       const a = hsla[4] !== undefined ? parseFloat(hsla[4]) : 1;
       // These tests only exercise l === 0 (pure black) -- full HSL->RGB
       // conversion isn't needed for that case.
-      if (l === 0) return `rgba(0, 0, 0, ${a})`;
+      if (l === 0) return normalize(0, 0, 0, a);
     }
     return null; // rejected, matching a real canvas ignoring an invalid value
   }
@@ -197,7 +203,7 @@ test("chip styles never emit an unrenderable background", () => {
 });
 
 // -----------------------------------------------------------------------
-// resolveRgb / relativeLuminance / contrastRatio / chipTextColor
+// resolveRgb / contrastRatio / chipTextColor
 // -----------------------------------------------------------------------
 
 test("resolveRgb parses hex without needing a document", () => {
@@ -224,6 +230,20 @@ test("resolveRgb resolves non-hex colours via a probe canvas when a document is 
   // rejects it outright, and resolveRgb must report that as unresolvable
   // rather than a resolved colour.
   assert.equal(resolveRgb("currentcolor"), null);
+});
+
+// Regression: resolveRgbViaCanvas detects a rejected `fillStyle` assignment
+// by the value not moving. Probing with a single sentinel makes any colour
+// that legitimately normalizes to that sentinel indistinguishable from a
+// rejection, so a renderable tag colour would silently become DEFAULT_COLOR.
+// Both sentinels are opaque hex, which is what an opaque rgb() normalizes to.
+test("resolveRgb resolves a colour that normalizes onto one of its own probe sentinels", () => {
+  const document = makeFakeColorDocument();
+  const { resolveRgb, renderableColor } = loadBundle(null, { CSS: { supports: () => true }, document }).__internal;
+  assertStructural.deepEqual(resolveRgb("rgb(253, 254, 255)"), { r: 253, g: 254, b: 255, a: 1 });
+  assertStructural.deepEqual(resolveRgb("rgb(1, 2, 3)"), { r: 1, g: 2, b: 3, a: 1 });
+  assert.equal(renderableColor("rgb(253, 254, 255)"), "rgb(253, 254, 255)");
+  assert.equal(renderableColor("rgb(1, 2, 3)"), "rgb(1, 2, 3)");
 });
 
 test("contrastRatio of white vs black is 21, and a colour against itself is 1", () => {
