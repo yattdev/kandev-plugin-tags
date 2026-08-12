@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.4.1] - 2026-08-11
+
+### Fixed
+
+- The shared data layer's coalescing no longer drops an invalidation. A
+  change notification arriving while a `host.storage.get` is already in
+  flight describes a write that `get` cannot see, so joining it left the
+  store serving pre-write data until some later unrelated change. The
+  request now marks the store dirty and re-issues the fetch on settle, so
+  the last write wins.
+- A re-entrant `initialize()` -- the host re-runs it without a matching
+  `destroy()` on a boot race, an HMR re-boot, or a fresh store instance --
+  now resets the shared stores alongside the drain that tore down their
+  subscriptions. Previously the one-shot subscribe guards stayed set and
+  `loaded` stayed true, so nothing resubscribed and nothing refetched, and
+  every chip surface served a dead cache for the life of the page.
+
 ## [0.4.0] - 2026-08-11
 
 ### Added
@@ -13,15 +30,7 @@
   are now cached in one module-level store apiece (one coalesced in-flight
   `host.storage.get`, one `host.storage.subscribe`), so N chip
   rows/dropdowns mounted at once for the same workspace/task issue exactly
-  one read and one subscription between them, instead of one each. The
-  coalescing never drops an invalidation: a change notification arriving
-  while a `get` is in flight (whose response is therefore already stale)
-  re-issues the fetch on settle instead of joining and being forgotten. And
-  a re-entrant `initialize()` -- the host re-runs it without a matching
-  `destroy()` on a boot race, an HMR re-boot, or a fresh store instance --
-  resets the stores alongside the subscription teardown, so the chip
-  surfaces resubscribe and refetch instead of serving a dead cache for the
-  life of the page.
+  one read and one subscription between them, instead of one each.
 - A stored tag id that looks like a generated catalog id (see `makeTagId`)
   but is no longer in the catalog -- an orphaned tag left behind by a
   deletion -- now renders no chip at all, on every chip surface, instead of

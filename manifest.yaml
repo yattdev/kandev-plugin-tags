@@ -3,7 +3,7 @@
 # the kandev monorepo for the full schema.
 id: "kandev-plugin-tags"
 api_version: 1
-version: "0.4.0"
+version: "0.4.1"
 display_name: "Tags"
 description: "Add one or more colored tags to a kanban card, stored privately per user, shown as chips on the card, the sidebar task row, and the /tasks list row, with a redesigned top-bar Tags box (icon-lg trigger, aligned rows, palette/hex color picker with explicit Update/Cancel) combining filter and manage (once the host supports it) or a manage-only fallback on older hosts."
 author: "yattdev"
