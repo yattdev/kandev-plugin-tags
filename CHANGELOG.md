@@ -13,10 +13,19 @@
   other four palette colours and `DEFAULT_COLOR` are unchanged.
 - `renderableColor` now also rejects a background that resolves to fully
   transparent -- `"transparent"`, `"rgba(0,0,0,0)"`, an 8-digit hex with a
-  zero alpha byte, `"hsla(...,0)"` -- and, given a real DOM to resolve
-  against, a value like `"currentcolor"` that CSS accepts but that can't be
-  reduced to concrete RGB. Both fall back to `DEFAULT_COLOR`, same as an
-  unparseable value already did.
+  zero alpha byte, `"hsla(...,0)"` -- along with `"currentcolor"` (which as
+  a chip background names the chip's own label colour, so it renders white
+  on white) and, given a real DOM to resolve against, a value like
+  `"var(--x)"` that CSS accepts but that can't be reduced to concrete RGB.
+  All fall back to `DEFAULT_COLOR`, same as an unparseable value already
+  did.
+- Colours are resolved by reading back a pixel painted on a probe canvas
+  rather than by parsing the canvas's `fillStyle` string, so a modern
+  colour function a browser renders perfectly well -- `oklch(...)`,
+  `lab(...)`, `color(display-p3 ...)`, `color-mix(...)`, which Chrome
+  echoes back verbatim instead of normalising to `rgb()` -- keeps its own
+  colour and gets a contrast-derived text colour, instead of being greyed
+  out to `DEFAULT_COLOR`.
 
 ## [0.5.3] - 2026-08-12
 

@@ -138,6 +138,14 @@
   // other routes (imports, legacy catalogs, host.storage).
   var HEX_RGBA_RE = /^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
 
+  // `currentcolor` names the element's *own* `color`, so as a chip
+  // background it resolves to the chip's own label colour: an unreadable
+  // chip by construction, whatever text colour is paired with it. It is
+  // also the one value the probe canvas answers wrongly rather than
+  // rejecting (it has no element to inherit from, so it paints black), so
+  // it has to be caught by name before any measurement is attempted.
+  var CURRENT_COLOR_RE = /^currentcolor$/i;
+
   var CHIP_ROW_STYLE = { display: "flex", flexWrap: "wrap", gap: "4px", alignItems: "center" };
   var CHIP_REMOVE_BUTTON_STYLE = {
     display: "inline-flex",
@@ -191,52 +199,64 @@
     };
   }
 
-  /** Parses a canvas-normalised `#rrggbb` or `rgba(r, g, b, a)` string to {r,g,b,a}. */
-  function parseCanvasColor(value) {
-    if (typeof value !== "string") return null;
-    if (HEX_RGBA_RE.test(value)) return parseHexRgb(value);
-    var m = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/i.exec(value);
-    if (!m) return null;
-    return {
-      r: parseFloat(m[1]),
-      g: parseFloat(m[2]),
-      b: parseFloat(m[3]),
-      a: m[4] !== undefined ? parseFloat(m[4]) : 1,
-    };
+  /**
+   * Paints `raw` into the 1x1 probe canvas over `sentinel` and reads the
+   * pixel back as `[r, g, b, a]` (all 0-255). The canvas silently ignores a
+   * value it cannot parse, leaving `sentinel` painted instead -- which is
+   * what the two-sentinel comparison in resolveRgbViaCanvas detects.
+   */
+  function probePixel(sentinel, raw) {
+    probeCanvasCtx.fillStyle = sentinel;
+    probeCanvasCtx.fillStyle = raw;
+    probeCanvasCtx.clearRect(0, 0, 1, 1);
+    probeCanvasCtx.fillRect(0, 0, 1, 1);
+    var data = probeCanvasCtx.getImageData(0, 0, 1, 1).data;
+    return [data[0], data[1], data[2], data[3]];
   }
 
   /**
    * Resolves a non-hex colour to concrete RGB by asking a real browser: a
-   * lazily created, module-level probe canvas normalises whatever it's
-   * handed to `#rrggbb` (opaque) or `rgba(r, g, b, a)` (translucent) --
-   * rejecting values it can't parse, including `currentcolor` (no element
-   * context). `raw` is assigned twice, once after each of two distinct
-   * sentinels: a rejected assignment leaves fillStyle at whichever sentinel
-   * preceded it, so the two reads disagree, while an accepted one lands on
-   * the same colour both times. Comparing a single read against one
-   * sentinel would instead reject any `raw` that legitimately resolves to
-   * that sentinel's colour (`"rgb(253, 254, 255)"` normalises to
-   * `#fdfeff`), recolouring a perfectly renderable tag to DEFAULT_COLOR.
-   * `null` with no `document` (the DOM-less test host) or on any failure.
+   * lazily created, module-level 1x1 probe canvas is painted with the value
+   * and the pixel read back, reducing *whatever* the browser accepts to
+   * concrete channels. Reading `fillStyle` back as a string instead would
+   * only cover the forms a browser happens to serialise as `#rrggbb` or
+   * `rgba(...)`: Chrome echoes `oklch(0.7 0.1 200)`, `lab(...)` and
+   * `color(display-p3 ...)` back verbatim, and no string parser here can
+   * turn those into RGB -- so they would resolve to `null` and renderable-
+   * Color would grey out a colour that renders perfectly well. The pixel
+   * does not care what syntax produced it.
+   *
+   * `raw` is painted twice, once over each of two distinct sentinels: a
+   * value the canvas rejects leaves the sentinel painted instead, so the
+   * two pixels disagree (`var(--x)`, `light-dark(...)`, garbage), while an
+   * accepted one paints the same pixel both times. Comparing against a
+   * single sentinel would instead reject any `raw` that legitimately
+   * resolves to that sentinel's own colour.
+   *
+   * `null` with no `document` (the DOM-less test host) or on any failure --
+   * including a host that blocks canvas readback.
    */
   function resolveRgbViaCanvas(raw) {
     if (typeof document === "undefined") return null;
     try {
       if (!probeCanvasCtx) {
         var canvas = document.createElement("canvas");
-        probeCanvasCtx = canvas && typeof canvas.getContext === "function" ? canvas.getContext("2d") : null;
+        if (canvas) {
+          canvas.width = 1;
+          canvas.height = 1;
+        }
+        probeCanvasCtx =
+          canvas && typeof canvas.getContext === "function"
+            ? canvas.getContext("2d", { willReadFrequently: true })
+            : null;
       }
       if (!probeCanvasCtx) return null;
-      var SENTINEL_A = "#010203";
-      var SENTINEL_B = "#fdfeff";
-      probeCanvasCtx.fillStyle = SENTINEL_A;
-      probeCanvasCtx.fillStyle = raw;
-      var afterA = probeCanvasCtx.fillStyle;
-      probeCanvasCtx.fillStyle = SENTINEL_B;
-      probeCanvasCtx.fillStyle = raw;
-      var afterB = probeCanvasCtx.fillStyle;
-      if (afterA !== afterB) return null; // rejected: fillStyle held each prior value
-      return parseCanvasColor(afterA);
+      var overA = probePixel("#010203", raw);
+      var overB = probePixel("#fdfeff", raw);
+      for (var i = 0; i < 4; i++) {
+        if (overA[i] !== overB[i]) return null; // rejected: each sentinel stayed painted
+      }
+      return { r: overA[0], g: overA[1], b: overA[2], a: overA[3] / 255 };
     } catch (e) {
       return null;
     }
@@ -249,10 +269,19 @@
    * measures contrast with no stubbing -- and everything else goes through
    * `resolveRgbViaCanvas`, memoised since chipStyle/denseChipStyle call
    * this once per chip per render.
+   *
+   * `currentcolor` is refused outright rather than measured, because it is
+   * the one value a canvas answers *confidently and wrongly*: with no
+   * element to inherit from it paints black, while in the DOM
+   * `background: currentcolor` resolves to the chip's own text colour.
+   * Trusting the canvas there would measure black, keep white text, and
+   * render white on white -- the exact bug this contrast pass exists to
+   * close (see CURRENT_COLOR_RE).
    */
   function resolveRgb(raw) {
     if (typeof raw !== "string") return null;
     var trimmed = raw.trim();
+    if (CURRENT_COLOR_RE.test(trimmed)) return null;
     if (HEX_RGBA_RE.test(trimmed)) return parseHexRgb(trimmed);
     if (resolveRgbCache.has(trimmed)) return resolveRgbCache.get(trimmed);
     var resolved = resolveRgbViaCanvas(trimmed);
@@ -312,22 +341,28 @@
    * `"rgba(0,0,0,0)"`, an 8-digit hex with a zero alpha byte). Either way
    * the chip becomes invisible against whatever text colour pairs with it.
    *
+   * `currentcolor` is refused by name and needs no parser at all: it is
+   * unreadable by construction, not merely unmeasurable (see
+   * CURRENT_COLOR_RE).
+   *
    * Hex passes immediately (the only shape this plugin writes). Anything
    * else is asked of the browser's own parser: a named or functional
-   * colour -- `"red"`, `"rgb(1 2 3)"` -- is a legitimate value an older
-   * catalog or an import may hold. But surviving `CSS.supports` is not
-   * enough on its own -- a value the browser *accepts* can still resolve to
-   * fully transparent, or (given a parser) to nothing `resolveRgb` can turn
-   * into concrete RGB at all (`"currentcolor"`, `var(--x)`) -- either of
-   * which now falls back to DEFAULT_COLOR too. Where there is no parser
-   * (the DOM-less test host) the value passes through unchecked, matching
-   * the previous behaviour instead of silently recolouring tags in a
-   * context that renders nothing anyway.
+   * colour -- `"red"`, `"rgb(1 2 3)"`, `"oklch(0.7 0.1 200)"` -- is a
+   * legitimate value an older catalog or an import may hold. But surviving
+   * `CSS.supports` is not enough on its own -- a value the browser
+   * *accepts* can still resolve to fully transparent, or (given a parser)
+   * to nothing `resolveRgb` can turn into concrete RGB at all
+   * (`var(--x)`, whose declaration the DOM drops too) -- either of which
+   * now falls back to DEFAULT_COLOR too. Where there is no parser (the
+   * DOM-less test host) the value passes through unchecked, matching the
+   * previous behaviour instead of silently recolouring tags in a context
+   * that renders nothing anyway.
    */
   function renderableColor(raw) {
     if (typeof raw !== "string") return DEFAULT_COLOR;
     var trimmed = raw.trim();
     if (trimmed === "") return DEFAULT_COLOR;
+    if (CURRENT_COLOR_RE.test(trimmed)) return DEFAULT_COLOR;
     if (HEX_COLOR_RE.test(trimmed)) return trimmed;
     if (typeof CSS !== "undefined" && CSS && typeof CSS.supports === "function") {
       if (!CSS.supports("color", trimmed)) return DEFAULT_COLOR;
@@ -337,10 +372,10 @@
       if (rgb !== null && rgb.a === 0) return DEFAULT_COLOR;
       // A `null` resolution is only conclusive when there was a real DOM to
       // resolve against -- with no `document` (the DOM-less test host),
-      // resolveRgb can't tell "currentcolor" apart from an ordinary named
-      // colour it simply has no browser to ask, so this stays permissive
-      // and matches the pre-contrast behaviour instead of blanket-rejecting
-      // every non-hex value the moment a CSS stub is injected.
+      // resolveRgb has no browser to ask about an ordinary named colour, so
+      // this stays permissive and matches the pre-contrast behaviour
+      // instead of blanket-rejecting every non-hex value the moment a CSS
+      // stub is injected.
       if (rgb === null && typeof document !== "undefined") return DEFAULT_COLOR;
       return trimmed;
     }

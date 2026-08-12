@@ -62,29 +62,43 @@ function makeFakeConsole() {
 }
 
 /**
- * A fake `document` whose `canvas.getContext("2d")` mimics the subset of a
- * real browser's `fillStyle` normalization that resolveRgb's canvas branch
- * depends on: hex echoes back unchanged (so the sentinel dance in
- * resolveRgbViaCanvas works), an *opaque* colour normalizes to `#rrggbb`
- * and a translucent one to `rgba(r, g, b, a)` -- which is what a real
- * canvas does, and the reason resolveRgbViaCanvas cannot tell a rejected
- * assignment from an accepted one by comparing against a single sentinel --
- * and anything unrecognized (`currentcolor`, garbage) is rejected --
- * fillStyle keeps its prior value, exactly as a canvas silently ignoring an
- * invalid CSS colour would.
+ * A fake `document` whose `canvas.getContext("2d")` mimics the behaviour
+ * resolveRgb's canvas branch depends on, as measured against a real
+ * headless Chromium (see the QA notes on this task):
+ *
+ *   - an accepted value is *painted*, and `getImageData` reads it back as
+ *     non-premultiplied `[r, g, b, a]` bytes -- which is how resolveRgb
+ *     reduces a colour whose `fillStyle` serialization it could never
+ *     parse (`oklch(...)`, `lab(...)`, `color(display-p3 ...)`) to RGB;
+ *   - a value the canvas cannot parse is silently ignored, leaving the
+ *     previously assigned colour painted -- which is what the two-sentinel
+ *     comparison detects;
+ *   - `currentcolor` is *accepted* and paints black, because a canvas has
+ *     no element to inherit from. A real Chrome does exactly this, which is
+ *     why resolveRgb has to refuse that keyword by name rather than trust
+ *     the measurement.
  */
 function makeFakeColorDocument() {
-  const hex2 = (n) => Math.round(Number(n)).toString(16).padStart(2, "0");
-  /** Canvas normalization: `#rrggbb` when fully opaque, `rgba(...)` otherwise. */
-  const normalize = (r, g, b, a) => (a === 1 ? `#${hex2(r)}${hex2(g)}${hex2(b)}` : `rgba(${r}, ${g}, ${b}, ${a})`);
+  /** Resolves to `[r, g, b, a]` bytes, or null when the canvas would ignore the value. */
   function resolve(value) {
     const v = String(value).trim().toLowerCase();
-    if (/^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/.test(v)) return v;
-    if (v === "transparent") return "rgba(0, 0, 0, 0)";
+    const hex = /^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/.exec(v);
+    if (hex) {
+      const d = hex[1];
+      const wide = d.length > 4;
+      const at = (i) => {
+        const pair = wide ? d.slice(i * 2, i * 2 + 2) : d[i] + d[i];
+        return parseInt(pair, 16);
+      };
+      const hasAlpha = d.length === 4 || d.length === 8;
+      return [at(0), at(1), at(2), hasAlpha ? at(3) : 255];
+    }
+    if (v === "transparent") return [0, 0, 0, 0];
+    if (v === "currentcolor") return [0, 0, 0, 255]; // no element context: real Chrome paints black
     const rgba = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(v);
     if (rgba) {
       const a = rgba[4] !== undefined ? parseFloat(rgba[4]) : 1;
-      return normalize(rgba[1], rgba[2], rgba[3], a);
+      return [Number(rgba[1]), Number(rgba[2]), Number(rgba[3]), Math.round(a * 255)];
     }
     const hsla = /^hsla?\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(v);
     if (hsla) {
@@ -92,21 +106,30 @@ function makeFakeColorDocument() {
       const a = hsla[4] !== undefined ? parseFloat(hsla[4]) : 1;
       // These tests only exercise l === 0 (pure black) -- full HSL->RGB
       // conversion isn't needed for that case.
-      if (l === 0) return normalize(0, 0, 0, a);
+      if (l === 0) return [0, 0, 0, Math.round(a * 255)];
     }
+    // A modern colour function: a real canvas accepts and paints it, but
+    // echoes the source syntax back from `fillStyle`, so only the pixel
+    // carries the answer.
+    if (v === "oklch(0.7 0.1 200)") return [64, 177, 183, 255];
     return null; // rejected, matching a real canvas ignoring an invalid value
   }
-  let fillStyleValue = "#000000";
+  let painted = [0, 0, 0, 255];
+  let pending = [0, 0, 0, 255];
   return {
     createElement: () => ({
+      width: 0,
+      height: 0,
       getContext: () => ({
-        get fillStyle() {
-          return fillStyleValue;
-        },
         set fillStyle(v) {
           const resolved = resolve(v);
-          if (resolved !== null) fillStyleValue = resolved;
+          if (resolved !== null) pending = resolved;
         },
+        clearRect() {},
+        fillRect() {
+          painted = pending;
+        },
+        getImageData: () => ({ data: painted }),
       }),
     }),
   };
@@ -226,10 +249,35 @@ test("resolveRgb resolves non-hex colours via a probe canvas when a document is 
   const document = makeFakeColorDocument();
   const { resolveRgb } = loadBundle(null, { document }).__internal;
   assertStructural.deepEqual(resolveRgb("transparent"), { r: 0, g: 0, b: 0, a: 0 });
-  // currentcolor has no element context to resolve against -- a real canvas
-  // rejects it outright, and resolveRgb must report that as unresolvable
-  // rather than a resolved colour.
-  assert.equal(resolveRgb("currentcolor"), null);
+  // A modern colour function: a real canvas paints it but echoes the source
+  // syntax back from `fillStyle`, so only reading the painted *pixel*
+  // resolves it. Greying these out would lose a colour that renders fine.
+  assertStructural.deepEqual(resolveRgb("oklch(0.7 0.1 200)"), { r: 64, g: 177, b: 183, a: 1 });
+});
+
+// Regression (found in QA against a real headless Chromium): a canvas has no
+// element to inherit from, so it *accepts* `currentcolor` and paints it
+// black -- it does not reject it. Measuring that black would keep white chip
+// text while the DOM resolves `background: currentcolor` to the chip's own
+// white label: white on white, the reported bug still open. resolveRgb must
+// refuse the keyword by name rather than trust the canvas, in every casing,
+// and renderableColor must fall back with no parser and no document at all.
+test("resolveRgb refuses currentcolor even when the canvas resolves it to a colour", () => {
+  const document = makeFakeColorDocument();
+  const withDom = loadBundle(null, { CSS: { supports: () => true }, document }).__internal;
+  // The fake canvas models the real one: currentcolor paints black.
+  assertStructural.deepEqual(withDom.resolveRgb("#000000"), { r: 0, g: 0, b: 0, a: 1 });
+  for (const spelling of ["currentcolor", "currentColor", "CURRENTCOLOR", "  currentcolor  "]) {
+    assert.equal(withDom.resolveRgb(spelling), null, spelling);
+    assert.equal(withDom.renderableColor(spelling), withDom.DEFAULT_COLOR, spelling);
+  }
+  assert.equal(withDom.chipStyle("currentcolor").background, withDom.DEFAULT_COLOR);
+  assert.equal(withDom.chipStyle("currentcolor").color, "#ffffff");
+  assert.equal(withDom.denseChipStyle("currentcolor").background, withDom.DEFAULT_COLOR);
+
+  // Unreadable by construction, not merely unmeasurable: no CSS, no document.
+  const bare = loadBundle().__internal;
+  assert.equal(bare.renderableColor("currentcolor"), bare.DEFAULT_COLOR);
 });
 
 // Regression: resolveRgbViaCanvas detects a rejected `fillStyle` assignment
@@ -301,16 +349,21 @@ test("renderableColor falls back to DEFAULT_COLOR for a fully-transparent colour
   assert.equal(renderableColor("hsla(0,0%,0%,0)"), DEFAULT_COLOR);
 });
 
-// "currentcolor" resolves to the chip's own (white) text colour, so a chip
-// backed by it renders white-on-white. A real canvas rejects it outright
-// (no element context to resolve against) -- with a parser AND a document
-// available, that rejection must fall back rather than pass through as a
-// "legitimate named colour".
-test("renderableColor falls back to DEFAULT_COLOR for currentcolor when a parser is available", () => {
+// Regression (found in QA against a real headless Chromium): a colour the
+// browser renders perfectly well must not be greyed out just because its
+// `fillStyle` serialization is unparseable. Chrome echoes `oklch(...)`,
+// `lab(...)` and `color(display-p3 ...)` back verbatim, so resolveRgb reads
+// the painted pixel instead -- and renderableColor passes the value through
+// with a contrast-derived text colour, rather than falling back.
+test("renderableColor passes through a modern colour function rather than greying it out", () => {
   const CSS = { supports: () => true };
   const document = makeFakeColorDocument();
-  const { renderableColor, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
-  assert.equal(renderableColor("currentcolor"), DEFAULT_COLOR);
+  const { renderableColor, chipStyle, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
+  assert.notEqual(renderableColor("oklch(0.7 0.1 200)"), DEFAULT_COLOR);
+  assert.equal(renderableColor("oklch(0.7 0.1 200)"), "oklch(0.7 0.1 200)");
+  assert.equal(chipStyle("oklch(0.7 0.1 200)").background, "oklch(0.7 0.1 200)");
+  // rgb(64, 177, 183) scores 2.28 against white, so it takes the dark token.
+  assert.equal(chipStyle("oklch(0.7 0.1 200)").color, "#111827");
 });
 
 // The regression case from the report: a transparent chip renders invisible
