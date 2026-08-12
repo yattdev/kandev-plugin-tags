@@ -4,11 +4,16 @@
 
 - `ui/bundle.test.js:1715` — the width-budget regression test compared a
   22-character worst case against the Create input's *border* box, so the host
-  `Input`'s own 16px padding and 2px border counted as room for text. The budget
-  looked 18px roomier than it is, enough to wave through `MAX_TAG_LENGTH` 23,
-  which really does scroll (23 × 11.66px = 268px of text in a 264px content
-  box). The guard now subtracts the input's chrome: it closes exactly at 22 and
-  fails at 23. (commit `8d092d7`)
+  `Input`'s own 16px padding and 2px border counted as room for text, and the
+  budget read 18px roomier than it is. The guard now measures the content box
+  and is calibrated against measured glyph widths (commits `8d092d7`,
+  `3aa9ba6`). Measured in Chrome at the input's computed 12px font: the
+  self-hosted app font (Figtree) is 11.22px at its widest ASCII glyph, the
+  fallback stack (Segoe UI / Arial) 12.18px. The 12px/char bound is therefore
+  a deliberate cover for the fallback, not a margin over the app font — which
+  is why the guard holds 22 and rejects 23 (23 fits the app font at 258px but
+  not the fallback at 280px). Before the fix the two modelling errors cancelled
+  at 22 characters, which is what made the budget look closed.
 - `ui/bundle.js:68-89`, `:1556` — the geometry comments stated the budget wrong
   in three places: `262px` twice where the arithmetic gives `282px`, and
   `w-[360px]` for the `w-[320px]` class that was actually replaced. Those
