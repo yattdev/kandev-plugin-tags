@@ -49,7 +49,7 @@ unreleased version.
   An alpha-carrying hex is now settled before the `CSS.supports` branch,
   closing a related gap where a host with no `CSS` object let `#ffffff00`
   through untouched. Three regression tests added; all three fail against the
-  previous implementation. (commit pending — see below)
+  previous implementation. (commit `dbbf067`)
 
 ## Action required by author
 
