@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.5] - 2026-08-12
+
+### Fixed
+
+- Corrected the width budget's own description of itself. The geometry comment
+  claimed the regression test sized the budget "for the wider of the two"
+  measured glyphs and the 0.5.4 note that the 12px bound "holds for both";
+  at the 22-character cap neither is true. 22 x 12.18px = 268px against 264px
+  of text area, so the bound sits ~4px *under* the fallback stack's worst case
+  rather than covering it, while the app font fits outright at 247px. The
+  practical exposure is a 22-character all-wide-glyph name during the
+  font-load window only. `MAX_TAG_LENGTH` is unchanged at 22 (the requested
+  cap) and the guard still holds 22 and rejects 23. Comment- and
+  changelog-only; the version moves because `ui/bundle.js` changed at all and
+  0.5.4 was already installed on the QA host.
+
 ## [0.5.4] - 2026-08-12
 
 ### Fixed
