@@ -1,141 +1,85 @@
 # Review notes (kandev-plugin-tags)
 
-Scope: the tag-chip contrast fix (`fix/tag-chip-contrast`, commit `83602f2`).
-This branch is stacked on `feature/fix-tag-display-and-e00`; the notes this file
-previously held belong to that branch's own review and travel with its PR.
-
 ## Fixed during review
 
-- `ui/bundle.js:218` — `resolveRgbViaCanvas` detected a rejected `fillStyle`
-  assignment by probing with two sentinels but comparing a single read against
-  only the second one, so the first sentinel did no work. Any colour that
-  legitimately normalises to that sentinel — `rgb(253, 254, 255)` and its
-  equivalents normalise to `#fdfeff` — read as a rejection, and
-  `renderableColor` then recoloured that perfectly renderable tag to
-  `DEFAULT_COLOR`. `raw` is now assigned after each sentinel and the two reads
-  compared; they agree only when the canvas accepted the value. The test fake
-  now models a real canvas's opaque-to-`#rrggbb` normalisation, which is what
-  makes the case reachable, and the new regression test fails against the
-  previous implementation. (commit `d2bd0a9`)
-- `ui/bundle.js:2174` — dropped `relativeLuminance` from `__internal`; that
-  object exists for `ui/bundle.test.js` only and no test read it.
-  (commit `d2bd0a9`)
+- `ui/bundle.test.js:1715` — the width-budget regression test compared a
+  22-character worst case against the Create input's *border* box, so the host
+  `Input`'s own 16px padding and 2px border counted as room for text, and the
+  budget read 18px roomier than it is. The guard now measures the content box
+  and is calibrated against measured glyph widths (commits `8d092d7`,
+  `3aa9ba6`). Measured in Chrome at the input's computed 12px font: the
+  self-hosted app font (Figtree) is 11.22px at its widest ASCII glyph, the
+  fallback stack (Segoe UI / Arial) 12.18px. The 12px/char bound is therefore
+  aimed at the fallback rather than being a margin over the app font — which is
+  why the guard holds 22 and rejects 23 (23 fits the app font at 258px but not
+  the fallback at 280px). Before the fix the two modelling errors cancelled at
+  22 characters, which is what made the budget look closed. See the 0.5.5 entry
+  below for the one respect in which 12px/char is *not* a full cover.
+- `ui/bundle.js:68-89`, `:1556` — the geometry comments stated the budget wrong
+  in three places: `262px` twice where the arithmetic gives `282px`, and
+  `w-[360px]` for the `w-[320px]` class that was actually replaced. Those
+  comments are the only record of why `MAX_TAG_LENGTH`, `TOPBAR_WIDTH` and
+  `CREATE_BUTTON_WIDTH` move together, so a wrong number in them is a trap for
+  the next edit. (commit `8d092d7`)
+- `ui/bundle.js:1902` — a task-filter option's colour was the one place a stored
+  colour still reached a rendered swatch without `renderableColor()`. Only
+  reachable on a host that supports `registerTaskFilter` (this one does not),
+  but the invariant should hold everywhere. (commit `8d092d7`)
 
-No version bump for those two: they were introduced and closed inside the same
-unreleased version.
+- `ui/bundle.js:74-79`, `CHANGELOG.md` — the geometry comment claimed the
+  regression test "sizes the budget for the wider of the two" measured glyphs,
+  and the changelog that the 12px bound "holds for both". Neither is true at
+  the cap: 22 x 12.18px = 268px against 264px of text area, so the bound sits
+  ~4px *under* the fallback's worst case rather than covering it (the app font
+  fits outright at 247px). The comment now says so; 0.5.4's changelog entry is
+  left as written, since that build shipped to the QA host, and the correction
+  is recorded in the new 0.5.5 entry instead. Practical exposure is a
+  22-character all-wide-glyph name during the font-load window only.
+  `MAX_TAG_LENGTH` stays 22 — the requested cap — and the guard still holds 22
+  and rejects 23. This is the
+  third pass over these same numbers, which is the argument for keeping the
+  arithmetic in the comment rather than the intent. Version moved to 0.5.5 for
+  it, since `ui/bundle.js` changed and 0.5.4 was already installed on QA.
 
-- `Makefile:4`, `manifest.yaml:6`, `CHANGELOG.md:3` — renumbered this branch's
-  release `0.5.4` -> `0.5.5`. `feature/fix-tag-display-and-e00`, the branch this
-  one is stacked on, bumped to `0.5.4` independently (commit `3aa9ba6`) while
-  this branch was open, so both claimed the same version with different
-  contents. Since that branch merges first, this one would have shipped a second
-  `0.5.4` and the installer rejects a reused version with
-  `409 version already installed`. `0.5.5` is free (`0.5.2` is spent — installed
-  on the QA host during review, then withdrawn).
-- `ui/bundle.js:372` — `renderableColor` rejected a background only at alpha
-  exactly 0, and `relativeLuminance` ignored alpha outright, so a colour with
-  `0 < alpha < 1` was measured as if opaque and the invisible-chip bug this
-  branch closes stayed open by degree. `chipStyle("#00000019")` returned
-  background `#00000019` with text `#ffffff` — a 10%-opaque black chip
-  (≈ `#e6e6e6` over a light card) carrying white text, contrast ≈ 1.2 —
-  reachable by the same `tags-catalog` user-state PUT that QA used for
-  `"transparent"` and `"currentcolor"`. Anything not fully opaque now falls
-  back to `DEFAULT_COLOR`. Compositing was rejected as the alternative: the
-  surface behind a chip belongs to the host and changes with its theme, so
-  there is nothing here to composite against without hard-coding a guess that
-  is wrong on the other theme. Nothing this plugin writes is affected —
-  `normalizeColor` only ever emits opaque 3/6-digit hex — so only out-of-band
-  values change, for which falling back is already the established answer.
-  An alpha-carrying hex is now settled before the `CSS.supports` branch,
-  closing a related gap where a host with no `CSS` object let `#ffffff00`
-  through untouched. Three regression tests added; all three fail against the
-  previous implementation. (commit `dbbf067`)
+Version is `0.5.5`. Each bump here is forced by the same rule, not cosmetic: any
+`ui/bundle.js` change needs a new version because the installer rejects a reused
+one with a 409, and every preceding number is spent on a build that was actually
+installed on the QA host — 0.5.2 during review (then withdrawn), 0.5.3, and
+0.5.4 for the QA re-run that validated the nine requirement checks against a
+served bundle diffed byte-identical to source. 0.5.5 covers the comment
+correction above.
 
-- `ui/bundle.js:147` — the `currentcolor` guard was anchored to the whole
-  value (`/^currentcolor$/i`), so the keyword slipped through nested inside a
-  colour function. The probe canvas resolves the nesting confidently — against
-  its own elementless context, i.e. black — so nothing downstream had reason to
-  doubt it, while the DOM resolves it against the chip's own `color`, which
-  `chipStyle` sets. Measured in headless Chromium on both the light and the
-  dark host theme, before the fix:
+### Considered and rejected
 
-  | catalog colour | rendered background | text | contrast |
-  |---|---|---|---|
-  | `color-mix(in srgb, currentcolor 50%, white)` | `color(srgb 1 1 1)` | `#ffffff` | **1.00** |
-  | `rgb(from currentcolor r g b)` | `color(srgb 1 1 1)` | `#ffffff` | **1.00** |
+A `max-width` cap on the Tags box, on the theory that a fixed 380px dropdown
+would clip the Create button on a 375px phone. Measured live at 375px and 360px:
+Radix already constrains the content to the viewport minus 16px (359px / 344px),
+button fully visible, with or without the cap. The cap was redundant, so it was
+reverted rather than shipped as dead CSS.
 
-  That is the bug this task was filed for, reached by nesting rather than by
-  the bare keyword. Now matched as an ident token anywhere in the value; both
-  render `DEFAULT_COLOR` at 4.83. The test fake modelled these as canvas
-  *rejections*, which is not what Chrome does — it now models the measured
-  acceptance, and the new test fails against the previous bundle.
-  (commit `674c2a4`)
+## Follow-up tasks created (out of scope for this PR)
+
+- **Tag chips: white text is hard-coded regardless of colour**
+  (task `61cdcf0a-9205-4593-b25f-56aa9d1c4ae8`) — `ui/bundle.js:193` and `:207`
+  hard-code `color: "#fff"` for a chip's label whatever its background is.
+  `renderableColor()` closes the *unparseable* colour case, but a colour that
+  parses fine can still be unreadable: `"transparent"` passes `CSS.supports` and
+  renders an invisible chip (the exact symptom `f082f7f` fixed, reached another
+  way), `"currentcolor"` resolves to the chip's own `#fff` (white on white), and
+  `rgba(0,0,0,0)` or any pale hex is unreadable. Introduced in `12ac076`
+  (2026-08-07) by ayattara <alassane.yattara@savoirfairelinux.com>; the
+  `denseChipStyle` copy came with `03bed70`, same author.
 
 ## Action required by author
 
-- **BLOCKER — a CSS system colour in the catalog renders illegibly on a dark
-  host theme, and this branch made two cases worse than before it.** The probe
-  canvas is detached, so it resolves system colours in the light scheme
-  always; the chip resolves them against its own `color-scheme`. The contrast
-  pass then measures the light-scheme colour and pairs text with the
-  dark-scheme one. Measured in headless Chromium under `color-scheme: dark`:
-
-  | catalog colour | before this branch | after this branch |
-  |---|---|---|
-  | `Canvas` | 18.73 | **1.06** — dark text on a dark chip |
-  | `Field` | 11.20 | **1.58** |
-  | `ButtonFace` | 5.33 | 3.33 (still passes) |
-  | `CanvasText` | 1.00 | 1.00 (already broken, unchanged) |
-
-  Hard-coded white text happened to be right for these; a contrast pass fed
-  the wrong background is worse than no contrast pass. Same reachability as
-  every other case this branch handles — an imported, legacy, or
-  hand-written catalog, never the plugin's own picker (Chrome accepts 42
-  system-colour keywords; 33 of them change with `color-scheme`).
-
-  Left unfixed because the three candidate fixes are real trade-offs and the
-  choice is yours:
-
-  1. **Return the canvas-resolved `rgb(...)` as the background** instead of
-     passing the authored value through. The rendered colour then *is* the
-     measured one, by construction, for every value — no keyword list, and it
-     closes system colours, nested `currentcolor` and anything else
-     context-dependent at once. Cost: a wide-gamut colour
-     (`color(display-p3 ...)`, `oklch(...)` outside sRGB) is clamped to sRGB
-     on a wide-gamut display, partly undoing round-1 QA's F2 intent — and I
-     have no wide-gamut display to verify that on. **Recommended.**
-  2. **Refuse system-colour keywords by name**, like `currentcolor`. Cheap and
-     surgical, but the list is browser-specific (Chrome's 42 differ from
-     Firefox's and Safari's) and is exactly the denylist the plan rejected.
-  3. **Accept it** and note the limitation. Defensible — the values are
-     out-of-band only — but `Canvas` and `Field` are strictly worse than
-     before this branch, so a reader who hits it sees a regression.
-
-  Rig: `/tmp/rig/dark.html` (renders each value under `color-scheme: light`
-  and `dark`, resolves the computed background through a canvas so modern
-  colour functions measure, and prints the real ratio). Not committed,
-  matching the earlier QA rigs.
-
-
-- **Merge order.** This branch stacks on `feature/fix-tag-display-and-e00`
-  (sibling task `ae8fc022`, unmerged). That branch must land first.
-- **This branch was not rebased onto the new base.** `fix/tag-chip-contrast` is
-  pushed to `origin`; `feature/fix-tag-display-and-e00` is local-only. Rebasing
-  onto it would rewrite published history *and* make the pushed branch depend on
-  commits that are not on `origin`, so the review left history alone and fixed
-  only the version collision. Expect a `CHANGELOG.md` conflict at merge (both
-  branches prepend a section); resolving it means dropping this branch's
-  placeholder note and letting `0.5.4` sit between `0.5.5` and `0.5.3`.
-- **Surface the user-visible colour change in the PR.** Three palette colours
-  flip from white to dark (`#111827`) chip text because white on them scored
-  below the 3.0 contrast floor: `#eab308` yellow (1.92), `#22c55e` green (2.28),
-  `#f97316` orange (2.80). The other four palette colours and `DEFAULT_COLOR`
-  are unchanged. Already recorded in `CHANGELOG.md` under `0.5.5`.
-- **A translucent tag colour now renders gray.** Any catalog colour with
-  `0 < alpha < 1` falls back to `DEFAULT_COLOR` rather than rendering
-  semi-transparent (see the alpha entry above). This cannot arise from the
-  plugin's own picker, which only writes opaque hex, but an imported or
-  hand-written catalog holding e.g. `rgba(59,130,246,0.9)` will show gray
-  chips for that tag instead of a slightly transparent blue. Worth a line in
-  the PR description alongside the palette flip. Recorded in `CHANGELOG.md`
-  under `0.5.5`.
+- **`fix/tag-chip-contrast` collides with this branch on version and base.**
+  That branch (task `61cdcf0a`, the follow-up below) is stacked on `85a76e6`,
+  two commits behind this branch's tip, and independently bumps
+  `manifest.yaml` from `0.5.3` to **`0.5.4`** — a number this branch had
+  already taken in `3aa9ba6` *and* installed on the QA host. Because both
+  sides write the identical value, `manifest.yaml` merges *cleanly* and ships
+  a different bundle under a version already claimed, which is exactly the
+  reuse the installer answers with a 409. `CHANGELOG.md` will conflict
+  outright, as both add a `[0.5.4]` section. This branch is now at `0.5.5`, so
+  land it first, then rebase that one onto this tip and renumber it to
+  **`0.5.6`**. Flagged to that task directly.

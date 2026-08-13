@@ -1,69 +1,50 @@
 # Changelog
 
-## [0.5.5] - 2026-08-12
-
-(0.5.4 is taken by `feature/fix-tag-display-and-e00`, the branch this one is
-stacked on, which bumped to it independently while this branch was open. Its
-entry lands here when that branch merges first.)
+## [0.5.6] - 2026-08-13
 
 ### Fixed
 
 - Tag chips no longer hard-code white text: `chipStyle`/`denseChipStyle` now
   pick between white and a dark (`#111827`) token from the resolved
-  background's WCAG contrast ratio, falling back to white only when the
-  background can't be resolved. Three palette colours flip to dark text as
-  a result -- `#eab308` yellow, `#22c55e` green, `#f97316` orange -- because
-  white on them fell below the 3.0 contrast floor (1.92 / 2.28 / 2.80); the
-  other four palette colours and `DEFAULT_COLOR` are unchanged.
-- `renderableColor` now also rejects a background that is not fully opaque.
-  Alpha zero -- `"transparent"`, `"rgba(0,0,0,0)"`, an 8-digit hex with a
-  zero alpha byte, `"hsla(...,0)"` -- is only the degenerate case: any
-  `0 < alpha < 1` composites with the host surface behind the chip, so the
-  colour in the catalog is not the colour rendered, and the contrast pass
-  above would measure the named colour instead of what the user sees
-  (`"#00000019"` measures as pure black, keeps white text, and renders as
-  roughly `#e6e6e6` under it on a light card). The host surface is not
-  readable from a plugin and changes with its theme, so these fall back to
-  `DEFAULT_COLOR` rather than being composited. `normalizeColor` only ever
-  writes opaque 3/6-digit hex, so no colour this plugin produces is
-  affected. An alpha-carrying hex is now settled before the `CSS.supports`
-  branch, so a host with no `CSS` object no longer lets `"#ffffff00"`
-  through untouched.
-- `renderableColor` also rejects `"currentcolor"` (which as a chip background
-  names the chip's own label colour, so it renders white on white) and, given
-  a real DOM to resolve against, a value like `"var(--x)"` that CSS accepts
-  but that can't be reduced to concrete RGB. Both fall back to
-  `DEFAULT_COLOR`, same as an unparseable value already did. The
-  `"currentcolor"` rejection matches the keyword anywhere in the value, not
-  only as the whole value: nested in `color-mix(in srgb, currentcolor 50%,
-  white)` or in relative colour syntax (`rgb(from currentcolor r g b)`) it
-  carries the same self-reference, and both rendered white text on a white
-  chip before this.
-- Colours are resolved by reading back a pixel painted on a probe canvas
-  rather than by parsing the canvas's `fillStyle` string, so a modern
-  colour function a browser renders perfectly well -- `oklch(...)`,
-  `lab(...)`, `color(display-p3 ...)`, `color-mix(...)`, which Chrome
-  echoes back verbatim instead of normalising to `rgb()` -- keeps its own
-  colour and gets a contrast-derived text colour, instead of being greyed
-  out to `DEFAULT_COLOR`.
-- A non-hex colour is now rendered as the `rgb(...)` the probe measured
-  rather than as the string the catalog held, so the colour a chip paints
-  is by construction the colour its text colour was chosen against. The
-  probe canvas is detached -- no element to inherit from, no
-  `color-scheme` -- so a context-dependent value resolved there against a
-  context the chip does not share. CSS system colours were the live case:
-  Chrome accepts 42 of them and resolves 33 differently under
-  `color-scheme: dark`, which the canvas never reports. On a dark host
-  theme a `Canvas` tag rendered `rgb(18,18,18)` carrying the dark text
-  picked for the light-scheme white the canvas had reported (contrast
-  1.06, against 18.73 for the white text this release replaced); `Field`
-  scored 1.58 and `Menu`, `Window`, `WindowText` and `CanvasText` failed
-  the same way. All now render identically on both themes. Two visible
-  consequences, both confined to colours the plugin's own picker cannot
-  write: such a tag no longer follows the host theme, and a wide-gamut
-  value (`color(display-p3 ...)`, an out-of-sRGB `oklch(...)`) is
-  sRGB-clamped on a wide-gamut display -- a clamp the contrast decision
-  already applied, now applied to the paint as well so the two agree.
+  background's WCAG contrast ratio. Yellow (`#eab308`), green (`#22c55e`),
+  and orange (`#f97316`) now use dark text; the other palette colours and
+  `DEFAULT_COLOR` retain white text.
+- `renderableColor` rejects transparent or partially transparent backgrounds,
+  `currentcolor` (including nested uses), and values the browser cannot
+  resolve, falling back to the legible default gray.
+- Non-hex colours are painted as the RGB value measured by the probe canvas,
+  so theme-dependent CSS system colours and the contrast-derived text colour
+  cannot resolve in different contexts. Modern colour functions remain
+  supported, but are rendered in their measured sRGB form.
+
+## [0.5.5] - 2026-08-12
+
+### Fixed
+
+- Corrected the width budget's own description of itself. The geometry comment
+  claimed the regression test sized the budget "for the wider of the two"
+  measured glyphs and the 0.5.4 note that the 12px bound "holds for both";
+  at the 22-character cap neither is true. 22 x 12.18px = 268px against 264px
+  of text area, so the bound sits ~4px *under* the fallback stack's worst case
+  rather than covering it, while the app font fits outright at 247px. The
+  practical exposure is a 22-character all-wide-glyph name during the
+  font-load window only. `MAX_TAG_LENGTH` is unchanged at 22 (the requested
+  cap) and the guard still holds 22 and rejects 23. Comment- and
+  changelog-only; the version moves because `ui/bundle.js` changed at all and
+  0.5.4 was already installed on the QA host.
+
+## [0.5.4] - 2026-08-12
+
+### Fixed
+
+- The Create input's width budget is now calibrated against a measured
+  worst-case glyph. The regression test compared a 22-character name to the
+  input's *border* box, so the host `Input`'s own 16px padding and 2px
+  border counted as room for text -- the budget read 18px roomier than it
+  is. Measured in Chrome at the input's 12px font: the self-hosted app font
+  (Figtree) is 11.22px at its widest ASCII glyph, the fallback stack
+  (Segoe UI / Arial) 12.18px. The test now measures the content box against
+  a 12px bound, which holds for both.
 
 ## [0.5.3] - 2026-08-12
 

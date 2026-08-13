@@ -71,8 +71,12 @@
   // input's own padding and border are taken out. A 32-character name needs
   // ~253px for ordinary lowercase and ~373px in the worst case (all wide
   // glyphs), so "32 characters, no horizontal scroll" was not satisfiable at
-  // any sane box width. At 22 the worst case is ~257px (the widest glyph
-  // measures ~11.66px), which the box is now sized to hold.
+  // any sane box width. At 22 the name needs 247px against the 11.22px widest
+  // glyph the app font actually renders, and 268px against the fallback
+  // stack's 12.18px one. The 264px of text area holds the first outright; the
+  // guard bounds the second at 12px/char (264px), so an all-wide-glyph name
+  // overshoots by ~4px during the font-load window only -- see the
+  // calibration note on the regression test.
   var MAX_TAG_LENGTH = 22;
 
   // Tags box geometry. These three are one budget, so they live together:

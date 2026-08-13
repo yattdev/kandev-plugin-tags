@@ -2168,9 +2168,17 @@ test("Tags box: a full-length tag name fits the Create input with no horizontal 
   const INPUT_CHROME = 18;
   const textWidth = inputWidth - INPUT_CHROME;
 
-  // Widest glyph in the input's font measured ~11.66px in Chrome at the
-  // Tags box's font-size; 12 is a deliberately pessimistic bound so this
-  // fails before a real user can produce a scrollbar.
+  // Calibration, measured in Chrome at the input's computed 12px font:
+  //   app font (self-hosted Figtree)      widest ASCII glyph 'm' = 11.22px
+  //   fallback stack (Segoe UI / Arial)   widest ASCII glyph '@' = 12.18px
+  // The plugin does not control which of those renders -- Figtree is
+  // self-hosted, so the fallback only shows during the font-load window, but
+  // the name must not scroll then either. 12 sits just under the fallback's
+  // worst glyph and well above the app font's, which is the bound worth
+  // holding: it keeps MAX_TAG_LENGTH at a value that survives both. Raising
+  // the cap to 23 fits the app font (258px) but not the fallback (280px),
+  // and this test is meant to fail in that case rather than ship a name
+  // length that scrolls for some users.
   const WORST_CASE_PX_PER_CHAR = 12;
   const worstCaseName = MAX_TAG_LENGTH * WORST_CASE_PX_PER_CHAR;
 
