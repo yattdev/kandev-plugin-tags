@@ -108,6 +108,13 @@ function makeFakeColorDocument() {
       // conversion isn't needed for that case.
       if (l === 0) return [0, 0, 0, Math.round(a * 255)];
     }
+    // CSS system colours, measured in Chromium: a detached canvas has no
+    // `color-scheme`, so it resolves every one of them in the light scheme
+    // and reports that as confidently as any other colour. The chip resolves
+    // the same keyword against its own inherited scheme -- which is why
+    // renderableColor hands back what it measured instead of the keyword.
+    if (v === "canvas" || v === "field") return [255, 255, 255, 255];
+    if (v === "canvastext") return [0, 0, 0, 255];
     // Nested `currentcolor`, measured in Chromium: a canvas *accepts* the
     // keyword inside a colour function and resolves it against its own
     // (elementless) context -- black -- so these come back as confident,
@@ -317,7 +324,7 @@ test("renderableColor refuses currentcolor nested inside a colour function", () 
     assert.equal(denseChipStyle(nested).background, DEFAULT_COLOR, nested);
   }
   // Token-bounded, so a colour that merely renders fine is not swept up.
-  assert.equal(renderableColor("oklch(0.7 0.1 200)"), "oklch(0.7 0.1 200)");
+  assert.notEqual(renderableColor("oklch(0.7 0.1 200)"), DEFAULT_COLOR);
   assert.equal(renderableColor("rgb(1, 2, 3)"), "rgb(1, 2, 3)");
 });
 
@@ -469,17 +476,56 @@ test("every background chipStyle emits is fully opaque", () => {
 // browser renders perfectly well must not be greyed out just because its
 // `fillStyle` serialization is unparseable. Chrome echoes `oklch(...)`,
 // `lab(...)` and `color(display-p3 ...)` back verbatim, so resolveRgb reads
-// the painted pixel instead -- and renderableColor passes the value through
-// with a contrast-derived text colour, rather than falling back.
-test("renderableColor passes through a modern colour function rather than greying it out", () => {
+// the painted pixel instead -- and renderableColor keeps the colour, with a
+// contrast-derived text colour, rather than falling back.
+//
+// It keeps the *colour*, not the authored string: the value comes back as the
+// measured `rgb(...)`, so what the chip paints is what chipTextColor measured
+// (see the system-colour regression below). rgb(64, 177, 183) is the same
+// colour oklch(0.7 0.1 200) renders as on an sRGB display.
+test("renderableColor keeps a modern colour function rather than greying it out", () => {
   const CSS = { supports: () => true };
   const document = makeFakeColorDocument();
   const { renderableColor, chipStyle, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
   assert.notEqual(renderableColor("oklch(0.7 0.1 200)"), DEFAULT_COLOR);
-  assert.equal(renderableColor("oklch(0.7 0.1 200)"), "oklch(0.7 0.1 200)");
-  assert.equal(chipStyle("oklch(0.7 0.1 200)").background, "oklch(0.7 0.1 200)");
+  assert.equal(renderableColor("oklch(0.7 0.1 200)"), "rgb(64, 177, 183)");
+  assert.equal(chipStyle("oklch(0.7 0.1 200)").background, "rgb(64, 177, 183)");
   // rgb(64, 177, 183) scores 2.28 against white, so it takes the dark token.
   assert.equal(chipStyle("oklch(0.7 0.1 200)").color, "#111827");
+});
+
+// Regression (measured in Chromium): the probe canvas is detached, so it has
+// no `color-scheme` and resolves every CSS system colour in the light scheme.
+// The chip resolves the same keyword against its own inherited scheme, so
+// with the authored value passed through, the contrast pass measured one
+// colour and the browser painted another. Measured under `color-scheme: dark`
+// with pass-through, versus the hard-coded white this branch replaced:
+//
+//   Canvas      18.73 -> 1.06   (#111827 text on rgb(18,18,18))
+//   Field       11.20 -> 1.58
+//   CanvasText   1.00 -> 1.00   (already broken)
+//
+// Handing back the measured rgb() binds the painted colour to the measured
+// one, so the chip is legible on both themes -- and it needs no list of
+// system-colour keywords, which differ per browser.
+test("renderableColor normalizes a context-dependent colour to what it measured", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { renderableColor, chipStyle, contrastRatio } = loadBundle(null, { CSS, document }).__internal;
+  // The fake models the measured canvas: system colours resolve light-scheme.
+  assert.equal(renderableColor("Canvas"), "rgb(255, 255, 255)");
+  assert.equal(renderableColor("CanvasText"), "rgb(0, 0, 0)");
+  for (const systemColour of ["Canvas", "CanvasText", "Field"]) {
+    const chip = chipStyle(systemColour);
+    // No longer a keyword, so it cannot re-resolve against the chip's theme.
+    assert.ok(/^rgb\(\d+, \d+, \d+\)$/.test(chip.background), `${systemColour} -> ${chip.background}`);
+    assert.ok(
+      contrastRatio(chip.background, chip.color) >= 3,
+      `${systemColour} contrast ${contrastRatio(chip.background, chip.color)} below 3.0`,
+    );
+  }
+  // Normalising is idempotent on a colour already in that form.
+  assert.equal(renderableColor("rgb(1, 2, 3)"), "rgb(1, 2, 3)");
 });
 
 // The regression case from the report: a transparent chip renders invisible

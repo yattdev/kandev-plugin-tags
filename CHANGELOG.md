@@ -46,6 +46,24 @@ entry lands here when that branch merges first.)
   echoes back verbatim instead of normalising to `rgb()` -- keeps its own
   colour and gets a contrast-derived text colour, instead of being greyed
   out to `DEFAULT_COLOR`.
+- A non-hex colour is now rendered as the `rgb(...)` the probe measured
+  rather than as the string the catalog held, so the colour a chip paints
+  is by construction the colour its text colour was chosen against. The
+  probe canvas is detached -- no element to inherit from, no
+  `color-scheme` -- so a context-dependent value resolved there against a
+  context the chip does not share. CSS system colours were the live case:
+  Chrome accepts 42 of them and resolves 33 differently under
+  `color-scheme: dark`, which the canvas never reports. On a dark host
+  theme a `Canvas` tag rendered `rgb(18,18,18)` carrying the dark text
+  picked for the light-scheme white the canvas had reported (contrast
+  1.06, against 18.73 for the white text this release replaced); `Field`
+  scored 1.58 and `Menu`, `Window`, `WindowText` and `CanvasText` failed
+  the same way. All now render identically on both themes. Two visible
+  consequences, both confined to colours the plugin's own picker cannot
+  write: such a tag no longer follows the host theme, and a wide-gamut
+  value (`color(display-p3 ...)`, an out-of-sRGB `oklch(...)`) is
+  sRGB-clamped on a wide-gamut display -- a clamp the contrast decision
+  already applied, now applied to the paint as well so the two agree.
 
 ## [0.5.3] - 2026-08-12
 

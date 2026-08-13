@@ -209,6 +209,16 @@
   }
 
   /**
+   * Serializes opaque channels back to `rgb(r, g, b)` -- the form
+   * `getComputedStyle` reports, so an inspected chip reads the same as the
+   * value renderableColor handed out. Only ever called with an opaque
+   * colour, so no alpha component is emitted.
+   */
+  function rgbString(rgb) {
+    return "rgb(" + rgb.r + ", " + rgb.g + ", " + rgb.b + ")";
+  }
+
+  /**
    * Paints `raw` into the 1x1 probe canvas over `sentinel` and reads the
    * pixel back as `[r, g, b, a]` (all 0-255). The canvas silently ignores a
    * value it cannot parse, leaving `sentinel` painted instead -- which is
@@ -391,6 +401,27 @@
    * DOM-less test host) the value passes through unchecked, matching the
    * previous behaviour instead of silently recolouring tags in a context
    * that renders nothing anyway.
+   *
+   * A value that *did* resolve is handed back as the measured
+   * `rgb(r, g, b)` rather than as the string the catalog held, so the
+   * colour the chip renders is by construction the colour chipTextColor
+   * measured. The probe canvas is detached: it has no element to inherit
+   * from and no `color-scheme`, so a context-dependent value resolves there
+   * against a context the chip does not share. A CSS system colour is the
+   * live case -- Chrome accepts 42 of them and resolves 33 differently
+   * under `color-scheme: dark`, which the canvas never reports. Measured on
+   * a dark host theme with the authored value passed through, `Canvas`
+   * rendered `rgb(18,18,18)` carrying the `#111827` text picked for the
+   * light-scheme white the canvas had reported: contrast 1.06, worse than
+   * the hard-coded white this replaced (18.73). Normalising closes that for
+   * every context-dependent value at once, with no keyword list to keep in
+   * step with browsers.
+   *
+   * The cost is gamut: a wide-gamut value (`color(display-p3 ...)`, an
+   * out-of-sRGB `oklch(...)`) comes back sRGB-clamped, because the probe
+   * reads sRGB bytes. That clamp was already in the contrast decision --
+   * only the rendered colour is newly bound to it, so measurement and paint
+   * now agree on a wide-gamut display instead of quietly diverging.
    */
   function renderableColor(raw) {
     if (typeof raw !== "string") return DEFAULT_COLOR;
@@ -415,7 +446,9 @@
       // instead of blanket-rejecting every non-hex value the moment a CSS
       // stub is injected.
       if (rgb === null && typeof document !== "undefined") return DEFAULT_COLOR;
-      return trimmed;
+      // Hand back what the probe actually measured, not what the catalog
+      // said, so the rendered colour and the measured one cannot disagree.
+      return rgb === null ? trimmed : rgbString(rgb);
     }
     return trimmed;
   }
