@@ -51,7 +51,71 @@ unreleased version.
   through untouched. Three regression tests added; all three fail against the
   previous implementation. (commit `dbbf067`)
 
+- `ui/bundle.js:147` — the `currentcolor` guard was anchored to the whole
+  value (`/^currentcolor$/i`), so the keyword slipped through nested inside a
+  colour function. The probe canvas resolves the nesting confidently — against
+  its own elementless context, i.e. black — so nothing downstream had reason to
+  doubt it, while the DOM resolves it against the chip's own `color`, which
+  `chipStyle` sets. Measured in headless Chromium on both the light and the
+  dark host theme, before the fix:
+
+  | catalog colour | rendered background | text | contrast |
+  |---|---|---|---|
+  | `color-mix(in srgb, currentcolor 50%, white)` | `color(srgb 1 1 1)` | `#ffffff` | **1.00** |
+  | `rgb(from currentcolor r g b)` | `color(srgb 1 1 1)` | `#ffffff` | **1.00** |
+
+  That is the bug this task was filed for, reached by nesting rather than by
+  the bare keyword. Now matched as an ident token anywhere in the value; both
+  render `DEFAULT_COLOR` at 4.83. The test fake modelled these as canvas
+  *rejections*, which is not what Chrome does — it now models the measured
+  acceptance, and the new test fails against the previous bundle.
+  (commit `674c2a4`)
+
 ## Action required by author
+
+- **BLOCKER — a CSS system colour in the catalog renders illegibly on a dark
+  host theme, and this branch made two cases worse than before it.** The probe
+  canvas is detached, so it resolves system colours in the light scheme
+  always; the chip resolves them against its own `color-scheme`. The contrast
+  pass then measures the light-scheme colour and pairs text with the
+  dark-scheme one. Measured in headless Chromium under `color-scheme: dark`:
+
+  | catalog colour | before this branch | after this branch |
+  |---|---|---|
+  | `Canvas` | 18.73 | **1.06** — dark text on a dark chip |
+  | `Field` | 11.20 | **1.58** |
+  | `ButtonFace` | 5.33 | 3.33 (still passes) |
+  | `CanvasText` | 1.00 | 1.00 (already broken, unchanged) |
+
+  Hard-coded white text happened to be right for these; a contrast pass fed
+  the wrong background is worse than no contrast pass. Same reachability as
+  every other case this branch handles — an imported, legacy, or
+  hand-written catalog, never the plugin's own picker (Chrome accepts 42
+  system-colour keywords; 33 of them change with `color-scheme`).
+
+  Left unfixed because the three candidate fixes are real trade-offs and the
+  choice is yours:
+
+  1. **Return the canvas-resolved `rgb(...)` as the background** instead of
+     passing the authored value through. The rendered colour then *is* the
+     measured one, by construction, for every value — no keyword list, and it
+     closes system colours, nested `currentcolor` and anything else
+     context-dependent at once. Cost: a wide-gamut colour
+     (`color(display-p3 ...)`, `oklch(...)` outside sRGB) is clamped to sRGB
+     on a wide-gamut display, partly undoing round-1 QA's F2 intent — and I
+     have no wide-gamut display to verify that on. **Recommended.**
+  2. **Refuse system-colour keywords by name**, like `currentcolor`. Cheap and
+     surgical, but the list is browser-specific (Chrome's 42 differ from
+     Firefox's and Safari's) and is exactly the denylist the plan rejected.
+  3. **Accept it** and note the limitation. Defensible — the values are
+     out-of-band only — but `Canvas` and `Field` are strictly worse than
+     before this branch, so a reader who hits it sees a regression.
+
+  Rig: `/tmp/rig/dark.html` (renders each value under `color-scheme: light`
+  and `dark`, resolves the computed background through a canvas so modern
+  colour functions measure, and prints the real ratio). Not committed,
+  matching the earlier QA rigs.
+
 
 - **Merge order.** This branch stacks on `feature/fix-tag-display-and-e00`
   (sibling task `ae8fc022`, unmerged). That branch must land first.
