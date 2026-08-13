@@ -373,6 +373,21 @@ test("renderableColor falls back to DEFAULT_COLOR for a partially transparent co
   assert.equal(renderableColor("rgb(1, 2, 3)"), "rgb(1, 2, 3)");
 });
 
+// Where the opacity cutoff actually lands. Alpha is quantised to a byte
+// everywhere it is measured -- both the hex path here and `getImageData` in a
+// browser -- so `0xfe` is the last value distinguishable from opaque and
+// `0xff` is opaque. Confirmed against a real headless Chromium, where
+// `rgba(0,0,0,0.998)` reads back alpha 0.996 (rejected) and
+// `rgba(0,0,0,0.999)` reads back exactly 1 (passes). Locked here because the
+// DOM-less harness is the only place CI can assert it.
+test("the opacity cutoff sits on the alpha byte, not on a fractional threshold", () => {
+  const { renderableColor, DEFAULT_COLOR } = loadBundle().__internal;
+  assert.equal(renderableColor("#000000ff"), "#000000ff");
+  assert.equal(renderableColor("#000000fe"), DEFAULT_COLOR);
+  assert.equal(renderableColor("#00000001"), DEFAULT_COLOR);
+  assert.equal(renderableColor("#00000000"), DEFAULT_COLOR);
+});
+
 // An alpha-carrying hex needs no parser and no document to measure, so it
 // must not depend on the CSS.supports branch -- a host with no `CSS` object
 // skips that branch entirely and previously let #ffffff00 through untouched.
