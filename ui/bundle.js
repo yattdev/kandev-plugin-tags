@@ -144,7 +144,16 @@
   // also the one value the probe canvas answers wrongly rather than
   // rejecting (it has no element to inherit from, so it paints black), so
   // it has to be caught by name before any measurement is attempted.
-  var CURRENT_COLOR_RE = /^currentcolor$/i;
+  //
+  // Matched as an ident token *anywhere* in the value rather than as the
+  // whole value: nested in `color-mix()` or in relative colour syntax the
+  // keyword carries the same self-reference, and the canvas resolves it just
+  // as confidently. Measured in Chromium against the whole-value-only form,
+  // both `color-mix(in srgb, currentcolor 50%, white)` (canvas: mid gray,
+  // DOM: `color(srgb 1 1 1)`) and `rgb(from currentcolor r g b)` (canvas:
+  // black, DOM: white) rendered a white chip carrying white text -- contrast
+  // 1.00, on both the light and the dark host theme.
+  var CURRENT_COLOR_RE = /(^|[^\w-])currentcolor([^\w-]|$)/i;
 
   var CHIP_ROW_STYLE = { display: "flex", flexWrap: "wrap", gap: "4px", alignItems: "center" };
   var CHIP_REMOVE_BUTTON_STYLE = {

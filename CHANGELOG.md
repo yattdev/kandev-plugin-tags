@@ -33,7 +33,12 @@ entry lands here when that branch merges first.)
   names the chip's own label colour, so it renders white on white) and, given
   a real DOM to resolve against, a value like `"var(--x)"` that CSS accepts
   but that can't be reduced to concrete RGB. Both fall back to
-  `DEFAULT_COLOR`, same as an unparseable value already did.
+  `DEFAULT_COLOR`, same as an unparseable value already did. The
+  `"currentcolor"` rejection matches the keyword anywhere in the value, not
+  only as the whole value: nested in `color-mix(in srgb, currentcolor 50%,
+  white)` or in relative colour syntax (`rgb(from currentcolor r g b)`) it
+  carries the same self-reference, and both rendered white text on a white
+  chip before this.
 - Colours are resolved by reading back a pixel painted on a probe canvas
   rather than by parsing the canvas's `fillStyle` string, so a modern
   colour function a browser renders perfectly well -- `oklch(...)`,

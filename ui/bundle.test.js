@@ -108,6 +108,14 @@ function makeFakeColorDocument() {
       // conversion isn't needed for that case.
       if (l === 0) return [0, 0, 0, Math.round(a * 255)];
     }
+    // Nested `currentcolor`, measured in Chromium: a canvas *accepts* the
+    // keyword inside a colour function and resolves it against its own
+    // (elementless) context -- black -- so these come back as confident,
+    // opaque colours rather than as rejections, exactly like the bare
+    // keyword above. Only refusing the keyword by name catches them.
+    if (v === "color-mix(in srgb, currentcolor 50%, white)") return [128, 128, 128, 255];
+    if (v === "color-mix(in srgb, currentcolor, #ffffff)") return [128, 128, 128, 255];
+    if (v === "rgb(from currentcolor r g b)") return [0, 0, 0, 255];
     // A modern colour function: a real canvas accepts and paints it, but
     // echoes the source syntax back from `fillStyle`, so only the pixel
     // carries the answer.
@@ -278,6 +286,39 @@ test("resolveRgb refuses currentcolor even when the canvas resolves it to a colo
   // Unreadable by construction, not merely unmeasurable: no CSS, no document.
   const bare = loadBundle().__internal;
   assert.equal(bare.renderableColor("currentcolor"), bare.DEFAULT_COLOR);
+});
+
+// Regression (measured in Chromium): the keyword guard was anchored to the
+// whole value, so `currentcolor` nested inside a colour function slipped
+// past it. The canvas resolves the nesting confidently -- against its own
+// elementless context, i.e. black -- so nothing downstream had reason to
+// doubt it, while the DOM resolves it against the chip's own `color`, which
+// chipStyle sets. Measured before this guard, on both the light and the dark
+// host theme: `color-mix(in srgb, currentcolor 50%, white)` rendered
+// `background: color(srgb 1 1 1)` under `color: #ffffff`, and
+// `rgb(from currentcolor r g b)` did the same -- white text on a white chip,
+// contrast 1.00. That is the reported bug, reached by nesting.
+test("renderableColor refuses currentcolor nested inside a colour function", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { renderableColor, resolveRgb, chipStyle, denseChipStyle, DEFAULT_COLOR } = loadBundle(null, {
+    CSS,
+    document,
+  }).__internal;
+  for (const nested of [
+    "color-mix(in srgb, currentcolor 50%, white)",
+    "color-mix(in srgb, currentColor, #ffffff)",
+    "rgb(from currentcolor r g b)",
+  ]) {
+    // The fake models the measured canvas: these resolve, they are not rejected.
+    assert.equal(resolveRgb(nested), null, nested);
+    assert.equal(renderableColor(nested), DEFAULT_COLOR, nested);
+    assert.equal(chipStyle(nested).background, DEFAULT_COLOR, nested);
+    assert.equal(denseChipStyle(nested).background, DEFAULT_COLOR, nested);
+  }
+  // Token-bounded, so a colour that merely renders fine is not swept up.
+  assert.equal(renderableColor("oklch(0.7 0.1 200)"), "oklch(0.7 0.1 200)");
+  assert.equal(renderableColor("rgb(1, 2, 3)"), "rgb(1, 2, 3)");
 });
 
 // Regression: resolveRgbViaCanvas detects a rejected `fillStyle` assignment
