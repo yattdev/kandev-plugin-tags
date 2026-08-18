@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.6.0] - 2026-08-18
+
+### Changed
+
+- fix: close plugin packaging Makefile calls (f8def7a)
+- fix: run plugin-pack from the SDK module (cd0a912)
+- fix: add missing packaging checksum (0361329)
+- review: render the colour that was measured, not the one the catalog held (be8a4fa)
+- review: notes for PR/MR description (b832329)
+- review: refuse currentcolor nested inside a colour function (674c2a4)
+- qa: lock the opacity cutoff to the alpha byte (ac1dafe)
+- review: notes for PR/MR description (3716960)
+- review: state the width budget's fallback-font margin honestly (2febfe0)
+- review: notes for PR/MR description (090b9ea)
+- review: reject any non-opaque chip background, not just alpha zero (dbbf067)
+- review: renumber to 0.5.5, the base branch took 0.5.4 (dfa111e)
+- qa: close currentcolor for real, and stop greying out modern colours (6106a57)
+- qa: correct the glyph calibration in the PR notes (bcf43f4)
+- qa: calibrate the width budget against a measured worst-case glyph (3aa9ba6)
+- review: notes for PR/MR description (60c1a39)
+- review: stop the canvas probe rejecting a colour that matches its sentinel (d2bd0a9)
+- fix: derive tag chip text colour from the background instead of white (83602f2)
+- review: notes for PR/MR description (85a76e6)
+- review: close the width-budget guard and the last unguarded colour (8d092d7)
+- qa: never render a chip in a colour the browser cannot parse (f082f7f)
+- fix: size the Tags box to its name limit (22 chars, 380px) (3a4c386)
+- release: 0.4.1 (cd65f15)
+- fix: never drop a store invalidation, and reset stores on re-initialize (4a9d5fe)
+- release: 0.4.0 (5519f6d)
+- feat: add task-row-tags slot, shared data layer, and Tags box redesign (03bed70)
+- Update README.md to a demo screencast (bdb61c3)
+
+
 ## [0.5.6] - 2026-08-13
 
 ### Fixed
