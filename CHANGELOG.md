@@ -1,5 +1,153 @@
 # Changelog
 
+## [0.5.6] - 2026-08-13
+
+### Fixed
+
+- Tag chips no longer hard-code white text: `chipStyle`/`denseChipStyle` now
+  pick between white and a dark (`#111827`) token from the resolved
+  background's WCAG contrast ratio. Yellow (`#eab308`), green (`#22c55e`),
+  and orange (`#f97316`) now use dark text; the other palette colours and
+  `DEFAULT_COLOR` retain white text.
+- `renderableColor` rejects transparent or partially transparent backgrounds,
+  `currentcolor` (including nested uses), and values the browser cannot
+  resolve, falling back to the legible default gray.
+- Non-hex colours are painted as the RGB value measured by the probe canvas,
+  so theme-dependent CSS system colours and the contrast-derived text colour
+  cannot resolve in different contexts. Modern colour functions remain
+  supported, but are rendered in their measured sRGB form.
+
+## [0.5.5] - 2026-08-12
+
+### Fixed
+
+- Corrected the width budget's own description of itself. The geometry comment
+  claimed the regression test sized the budget "for the wider of the two"
+  measured glyphs and the 0.5.4 note that the 12px bound "holds for both";
+  at the 22-character cap neither is true. 22 x 12.18px = 268px against 264px
+  of text area, so the bound sits ~4px *under* the fallback stack's worst case
+  rather than covering it, while the app font fits outright at 247px. The
+  practical exposure is a 22-character all-wide-glyph name during the
+  font-load window only. `MAX_TAG_LENGTH` is unchanged at 22 (the requested
+  cap) and the guard still holds 22 and rejects 23. Comment- and
+  changelog-only; the version moves because `ui/bundle.js` changed at all and
+  0.5.4 was already installed on the QA host.
+
+## [0.5.4] - 2026-08-12
+
+### Fixed
+
+- The Create input's width budget is now calibrated against a measured
+  worst-case glyph. The regression test compared a 22-character name to the
+  input's *border* box, so the host `Input`'s own 16px padding and 2px
+  border counted as room for text -- the budget read 18px roomier than it
+  is. Measured in Chrome at the input's 12px font: the self-hosted app font
+  (Figtree) is 11.22px at its widest ASCII glyph, the fallback stack
+  (Segoe UI / Arial) 12.18px. The test now measures the content box against
+  a 12px bound, which holds for both.
+
+## [0.5.3] - 2026-08-12
+
+(0.5.2 was installed on a test host during review and then withdrawn, so
+that number is spent -- the installer refuses to reuse a version.)
+
+### Fixed
+
+- A task-filter option's colour goes through the same `renderableColor`
+  guard the chips use, so a stored colour the browser cannot parse leaves
+  its filter swatch grey rather than blank. (Only reachable on a host that
+  supports `registerTaskFilter`.)
+
+## [0.5.1] - 2026-08-12
+
+### Fixed
+
+- A tag whose stored colour is not something the browser can render no
+  longer produces an unreadable chip. `sanitizeCatalog` accepts any string
+  as a colour while `normalizeColor` only guards the write path, so a value
+  that never went through this plugin's UI reached the DOM unvalidated; the
+  browser then dropped the declaration entirely, leaving a transparent
+  background behind the chip's hard-coded white text. Such values now fall
+  back to `DEFAULT_COLOR` at every chip surface and at the Tags box swatch.
+  Hex is passed straight through, and a named or functional colour --
+  `"red"`, `"rgb(1 2 3)"` -- is checked with `CSS.supports` rather than
+  rejected, so catalogs holding one keep rendering it.
+
+## [0.5.0] - 2026-08-12
+
+### Changed
+
+- **Tag names are now capped at 22 characters (was 32), and the Tags box is
+  380px wide (was 320px).** These two are one budget: the Create input gets
+  whatever the fixed-width box has left after its padding and the Create
+  button. At 320px that was 222px of input, but a 32-character name needs
+  ~253px for ordinary lowercase and ~373px for the widest glyphs -- so the
+  input scrolled horizontally for most full-length names, which is the bug
+  this was meant to fix. No box width makes "32 characters, never scrolls"
+  true at a sensible size; 22 characters in 282px of input does. A tag whose
+  stored name is already longer than 22 characters still renders in full --
+  only creating or renaming past the cap is refused.
+- The box's width is now an inline style rather than a `w-[320px]` class.
+  Tailwind only emits an arbitrary-value utility for literals it finds in
+  source it scans, and the host does not scan this bundle -- the old class
+  resolved only because unrelated host components happened to use the same
+  literal, which is not a dependency this plugin should have.
+
+## [0.4.1] - 2026-08-11
+
+### Fixed
+
+- The shared data layer's coalescing no longer drops an invalidation. A
+  change notification arriving while a `host.storage.get` is already in
+  flight describes a write that `get` cannot see, so joining it left the
+  store serving pre-write data until some later unrelated change. The
+  request now marks the store dirty and re-issues the fetch on settle, so
+  the last write wins.
+- A re-entrant `initialize()` -- the host re-runs it without a matching
+  `destroy()` on a boot race, an HMR re-boot, or a fresh store instance --
+  now resets the shared stores alongside the drain that tore down their
+  subscriptions. Previously the one-shot subscribe guards stayed set and
+  `loaded` stayed true, so nothing resubscribed and nothing refetched, and
+  every chip surface served a dead cache for the life of the page.
+
+## [0.4.0] - 2026-08-11
+
+### Added
+
+- Tags now also render on the sidebar task row and the `/tasks` list row
+  (a new `task-row-tags` slot), as a dense chip row capped at 3 visible
+  chips plus a "+N" indicator, with no per-chip remove control -- removing
+  a tag stays confined to the "Add tag..." modal on that surface. The
+  existing kanban card chip row (`task-card-tags`) is unchanged.
+- A shared data layer: the tag catalog and each task's applied-tag-id list
+  are now cached in one module-level store apiece (one coalesced in-flight
+  `host.storage.get`, one `host.storage.subscribe`), so N chip
+  rows/dropdowns mounted at once for the same workspace/task issue exactly
+  one read and one subscription between them, instead of one each.
+- A stored tag id that looks like a generated catalog id (see `makeTagId`)
+  but is no longer in the catalog -- an orphaned tag left behind by a
+  deletion -- now renders no chip at all, on every chip surface, instead of
+  a chip labeled with the raw id. A legacy v1 plain-string tag name still
+  renders exactly as before.
+
+### Changed
+
+- The Tags box (the top-bar dropdown) is redesigned:
+  - its trigger is now `size: "icon-lg"` (previously smaller);
+  - the dropdown itself is 320px wide (previously 260px), wide enough that
+    a full 32-character tag name fits the Create input with no horizontal
+    scroll;
+  - each tag row is a `20px 1fr 24px` CSS grid (`20px 16px 1fr 24px` with a
+    Tier-2 filter checkbox column), so the delete button's x-offset is
+    identical on every row regardless of the tag name's length -- fixing
+    the "delete button doesn't line up" bug;
+  - the color swatch is now a button that opens a picker box beneath that
+    row: the color palette and a native hex input feed a single pending
+    color (no storage write), with a live preview pill and explicit
+    **Update**/**Cancel** buttons -- fixing the "color doesn't apply until
+    blur, with no way to preview or discard it first" bug. Only one row's
+    picker may be open at a time.
+
 ## [0.3.0] - 2026-08-10
 
 ### Changed

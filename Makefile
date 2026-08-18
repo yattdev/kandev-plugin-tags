@@ -1,7 +1,7 @@
 .PHONY: build run test fmt vet package package-host clean setup check-sdk
 
 BIN := bin/kandev-plugin-tags
-VERSION := 0.3.0
+VERSION := 0.5.6
 STAGE := .build/stage
 PKG_OUT := kandev-plugin-tags-$(VERSION).tar.gz
 
@@ -99,7 +99,8 @@ package: check-sdk
 		GOOS=darwin  GOARCH=amd64 go build -o $(STAGE)/server/plugin-darwin-amd64      ./server && \
 		GOOS=darwin  GOARCH=arm64 go build -o $(STAGE)/server/plugin-darwin-arm64      ./server && \
 		GOOS=windows GOARCH=amd64 go build -o $(STAGE)/server/plugin-windows-amd64.exe ./server && \
-		go run github.com/kandev/kandev/cmd/plugin-pack -dir $(STAGE) -out $(PKG_OUT))
+		PLUGIN_ROOT="$$(pwd)" && \
+		(cd "$$KSDK" && go run ./cmd/plugin-pack -dir "$$PLUGIN_ROOT/$(STAGE)" -out "$$PLUGIN_ROOT/$(PKG_OUT)"))
 	rm -rf $(STAGE)
 	@echo "Wrote $(PKG_OUT)"
 
@@ -111,7 +112,8 @@ package-host: check-sdk
 	cp ui/bundle.js $(STAGE)/ui/bundle.js
 	$(call with-sdk-override,\
 		go build -o $(STAGE)/server/plugin-$$(go env GOOS)-$$(go env GOARCH)$$(go env GOEXE) ./server && \
-		go run github.com/kandev/kandev/cmd/plugin-pack -dir $(STAGE) -out $(PKG_OUT) -platform-only)
+		PLUGIN_ROOT="$$(pwd)" && \
+		(cd "$$KSDK" && go run ./cmd/plugin-pack -dir "$$PLUGIN_ROOT/$(STAGE)" -out "$$PLUGIN_ROOT/$(PKG_OUT)" -platform-only))
 	rm -rf $(STAGE)
 	@echo "Wrote $(PKG_OUT)"
 

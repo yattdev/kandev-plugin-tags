@@ -10,6 +10,11 @@ user's tags and tag catalog are private and never shown to teammates.
 - **On every card**: tags you've added render as a row of small colored
   chips below the card's other badges. No tags, no row -- the row only
   appears once you've added at least one.
+- **On the sidebar row and the `/tasks` list row too**: the same tags
+  render there as a smaller, denser chip row, capped at 3 visible chips
+  plus a `+N` indicator when a task has more. There's no remove control on
+  this row -- removing a tag stays confined to the card chip row or the Add
+  tag modal.
 - **Add/pick a tag**: open a card's context/dropdown menu, choose **Add
   tag...** (a tag icon, flat top-level item between "Move to" and "Link").
   A medium modal shows a "Select or create a tag..." input (typing a name
@@ -17,29 +22,35 @@ user's tags and tag catalog are private and never shown to teammates.
   catalog and applies it to the card) above a scrollable list of your
   existing colored tags rendered as pills -- click a row to apply/remove it
   from this card; applied tags show a checkmark.
-- **Filter and manage from one place**: a filter-icon button in the app's
-  top bar opens a dropdown listing your whole tag catalog as
-  color-swatch + colored pill rows, with its own **Create** input above the
-  list (independent of the Add tag modal -- creating a tag here works the
-  same way: trimmed, deduplicated case-insensitively, a specific error if
-  the name already exists). On a host new enough to support it
+- **Filter and manage from one place**: an icon-lg filter-icon button in
+  the app's top bar opens the Tags box, a 380px-wide dropdown listing your
+  whole tag catalog as grid-aligned rows (color swatch, name pill, delete
+  button in a fixed-width column so it lines up identically regardless of
+  the tag's name length), with its own **Create** input above the list
+  (independent of the Add tag modal -- creating a tag here works the same
+  way: trimmed, deduplicated case-insensitively, a specific error if the
+  name already exists). On a host new enough to support it
   (`host.taskFilters`/`host.storage.listByKey`), each row also gets a
   checkbox, and checking one filters the board to cards carrying that tag
   (multi-select is OR). The same dropdown is where you recolor (click the
-  swatch), rename (click a pill), or delete a tag -- delete asks for
-  confirmation stating the exact number of cards carrying the tag, and
-  removes it from both the catalog and every one of those cards. On an
-  older host without `host.taskFilters`/`host.storage.listByKey`, the
-  checkboxes are omitted and, if the host at least ships
+  swatch to open a picker box with the color palette, a custom hex input,
+  and a live preview -- nothing is written until you press **Update**;
+  **Cancel** discards your pick), rename (click a pill), or delete a tag --
+  delete asks for confirmation stating the exact number of cards carrying
+  the tag, and removes it from both the catalog and every one of those
+  cards. On an older host without `host.taskFilters`/`host.storage.listByKey`,
+  the checkboxes are omitted and, if the host at least ships
   `registerTaskFilter`, the board's existing built-in filter dropdown keeps
   its own "Tags" section/Untagged option instead, so filtering is never
   lost, only relocated depending on what the host supports -- creating,
   recoloring, renaming, and deleting stay available here regardless of tier.
 - **Remove a tag from a card**: click the `x` on a chip on the card itself,
   or click it off in the Add tag modal.
-- Tag names are trimmed, capped at 32 characters, deduplicated
+- Tag names are trimmed, capped at 22 characters, deduplicated
   case-insensitively within your catalog; each card is capped at 12 applied
-  tags.
+  tags. Deleting a tag leaves any card that still carried it (a rare race
+  with the cascade removal above) showing no chip for it at all, rather
+  than a chip labeled with the raw id.
 
 ## Install
 
@@ -76,7 +87,10 @@ even the presence of any tags is invisible to teammates.
 Cards tagged before this release (a plain array of tag-name strings, no
 catalog) keep working: an id that isn't found in the catalog is rendered
 using the id itself as the tag's name, with a neutral default color -- no
-migration write is performed, so v1 and v2 tags can coexist on a card.
+migration write is performed, so v1 and v2 tags can coexist on a card. The
+one exception is an id shaped like a generated catalog id that isn't found
+in the catalog -- an orphaned tag left behind by a deletion -- which renders
+no chip at all rather than a chip labeled with the raw id.
 
 Tags does not use, request, or spend LLM tokens, and has no external
 service or analytics integration.

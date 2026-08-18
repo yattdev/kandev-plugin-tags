@@ -3,9 +3,9 @@
 # the kandev monorepo for the full schema.
 id: "kandev-plugin-tags"
 api_version: 1
-version: "0.3.0"
+version: "0.5.6"
 display_name: "Tags"
-description: "Add one or more colored tags to a kanban card, stored privately per user, shown as chips on the card, with a combined top-bar filter+manage dropdown (once the host supports it) or a manage-only fallback on older hosts."
+description: "Add one or more colored tags to a kanban card, stored privately per user, shown as chips on the card, the sidebar task row, and the /tasks list row, with a redesigned top-bar Tags box (icon-lg trigger, aligned rows, palette/hex color picker with explicit Update/Cancel) combining filter and manage (once the host supports it) or a manage-only fallback on older hosts."
 author: "yattdev"
 repo_url: "https://github.com/yattdev/kandev-plugin-tags"
 categories: ["tools"]
@@ -32,13 +32,19 @@ capabilities:
   user_state: true
 
 # ui.bundle points at the hand-written, no-build ES module frontend half:
-# a task-card-tags chip row, an "Add tag..." kanban menu action (with a tag
-# icon) opening a host.ui-built picker modal (create-or-select, scrollable
-# pill list), and a "main-top-bar" dropdown behind a filter icon. The
-# top-bar dropdown's behavior depends on what the host supports
-# (detectHostCapabilities in ui/bundle.js):
-#   - host predates registerTaskFilter: manage-only (rename/delete; no
-#     filtering is possible on this host at all).
+# a task-card-tags chip row (kanban card) and a task-row-tags chip row
+# (sidebar task row / /tasks list row -- smaller chips, capped at 3 plus a
+# "+N" indicator, no per-chip remove control), an "Add tag..." kanban menu
+# action (with a tag icon) opening a host.ui-built picker modal
+# (create-or-select, scrollable pill list), and a "main-top-bar" Tags box
+# behind an icon-lg filter-icon trigger: a 380px, grid-aligned tag list
+# (a fixed-width delete column regardless of tag name length) with a
+# swatch-button color picker -- palette/hex swatches, a live preview, and
+# explicit Update/Cancel commit buttons, so a color never applies until you
+# choose to commit it. The Tags box's filter/manage behavior depends on
+# what the host supports (detectHostCapabilities in ui/bundle.js):
+#   - host predates registerTaskFilter: manage-only (rename/recolor/delete;
+#     no filtering is possible on this host at all).
 #   - host has registerTaskFilter but not host.taskFilters/listByKey: the
 #     built-in display/filter dropdown keeps its own "Tags" section, and
 #     this dropdown stays manage-only so the two don't duplicate one

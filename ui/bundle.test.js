@@ -28,19 +28,28 @@ const bundleSource = fs.readFileSync(path.join(__dirname, "bundle.js"), "utf8");
  * itself (`__internal`, populated at the bottom of bundle.js for this
  * purpose only).
  */
-function loadBundle(consoleOverride) {
+/**
+ * `extraGlobals` are merged into the bundle's context. The bundle runs in its
+ * own vm realm, so a global the browser would supply -- `CSS`, say -- is
+ * absent unless injected here; setting it on the test realm's `globalThis`
+ * has no effect on the bundle.
+ */
+function loadBundle(consoleOverride, extraGlobals) {
   let plugin = null;
-  const context = {
-    console: consoleOverride || console,
-    setTimeout,
-    clearTimeout,
-    window: {
-      registerKandevPlugin(id, definition) {
-        assert.equal(id, "kandev-plugin-tags");
-        plugin = definition;
+  const context = Object.assign(
+    {
+      console: consoleOverride || console,
+      setTimeout,
+      clearTimeout,
+      window: {
+        registerKandevPlugin(id, definition) {
+          assert.equal(id, "kandev-plugin-tags");
+          plugin = definition;
+        },
       },
     },
-  };
+    extraGlobals,
+  );
   vm.runInNewContext(bundleSource, context, { filename: "ui/bundle.js" });
   assert.ok(plugin, "bundle registered the plugin");
   return plugin;
@@ -50,6 +59,95 @@ function loadBundle(consoleOverride) {
 function makeFakeConsole() {
   const calls = { error: [] };
   return { console: { error: (...args) => calls.error.push(args) }, calls };
+}
+
+/**
+ * A fake `document` whose `canvas.getContext("2d")` mimics the behaviour
+ * resolveRgb's canvas branch depends on, as measured against a real
+ * headless Chromium (see the QA notes on this task):
+ *
+ *   - an accepted value is *painted*, and `getImageData` reads it back as
+ *     non-premultiplied `[r, g, b, a]` bytes -- which is how resolveRgb
+ *     reduces a colour whose `fillStyle` serialization it could never
+ *     parse (`oklch(...)`, `lab(...)`, `color(display-p3 ...)`) to RGB;
+ *   - a value the canvas cannot parse is silently ignored, leaving the
+ *     previously assigned colour painted -- which is what the two-sentinel
+ *     comparison detects;
+ *   - `currentcolor` is *accepted* and paints black, because a canvas has
+ *     no element to inherit from. A real Chrome does exactly this, which is
+ *     why resolveRgb has to refuse that keyword by name rather than trust
+ *     the measurement.
+ */
+function makeFakeColorDocument() {
+  /** Resolves to `[r, g, b, a]` bytes, or null when the canvas would ignore the value. */
+  function resolve(value) {
+    const v = String(value).trim().toLowerCase();
+    const hex = /^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/.exec(v);
+    if (hex) {
+      const d = hex[1];
+      const wide = d.length > 4;
+      const at = (i) => {
+        const pair = wide ? d.slice(i * 2, i * 2 + 2) : d[i] + d[i];
+        return parseInt(pair, 16);
+      };
+      const hasAlpha = d.length === 4 || d.length === 8;
+      return [at(0), at(1), at(2), hasAlpha ? at(3) : 255];
+    }
+    if (v === "transparent") return [0, 0, 0, 0];
+    if (v === "currentcolor") return [0, 0, 0, 255]; // no element context: real Chrome paints black
+    const rgba = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(v);
+    if (rgba) {
+      const a = rgba[4] !== undefined ? parseFloat(rgba[4]) : 1;
+      return [Number(rgba[1]), Number(rgba[2]), Number(rgba[3]), Math.round(a * 255)];
+    }
+    const hsla = /^hsla?\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(v);
+    if (hsla) {
+      const l = parseFloat(hsla[3]);
+      const a = hsla[4] !== undefined ? parseFloat(hsla[4]) : 1;
+      // These tests only exercise l === 0 (pure black) -- full HSL->RGB
+      // conversion isn't needed for that case.
+      if (l === 0) return [0, 0, 0, Math.round(a * 255)];
+    }
+    // CSS system colours, measured in Chromium: a detached canvas has no
+    // `color-scheme`, so it resolves every one of them in the light scheme
+    // and reports that as confidently as any other colour. The chip resolves
+    // the same keyword against its own inherited scheme -- which is why
+    // renderableColor hands back what it measured instead of the keyword.
+    if (v === "canvas" || v === "field") return [255, 255, 255, 255];
+    if (v === "canvastext") return [0, 0, 0, 255];
+    // Nested `currentcolor`, measured in Chromium: a canvas *accepts* the
+    // keyword inside a colour function and resolves it against its own
+    // (elementless) context -- black -- so these come back as confident,
+    // opaque colours rather than as rejections, exactly like the bare
+    // keyword above. Only refusing the keyword by name catches them.
+    if (v === "color-mix(in srgb, currentcolor 50%, white)") return [128, 128, 128, 255];
+    if (v === "color-mix(in srgb, currentcolor, #ffffff)") return [128, 128, 128, 255];
+    if (v === "rgb(from currentcolor r g b)") return [0, 0, 0, 255];
+    // A modern colour function: a real canvas accepts and paints it, but
+    // echoes the source syntax back from `fillStyle`, so only the pixel
+    // carries the answer.
+    if (v === "oklch(0.7 0.1 200)") return [64, 177, 183, 255];
+    return null; // rejected, matching a real canvas ignoring an invalid value
+  }
+  let painted = [0, 0, 0, 255];
+  let pending = [0, 0, 0, 255];
+  return {
+    createElement: () => ({
+      width: 0,
+      height: 0,
+      getContext: () => ({
+        set fillStyle(v) {
+          const resolved = resolve(v);
+          if (resolved !== null) pending = resolved;
+        },
+        clearRect() {},
+        fillRect() {
+          painted = pending;
+        },
+        getImageData: () => ({ data: painted }),
+      }),
+    }),
+  };
 }
 
 // -----------------------------------------------------------------------
@@ -69,7 +167,7 @@ test("normalizeName rejects an empty or whitespace-only string", () => {
 
 test("normalizeName rejects a name over MAX_TAG_LENGTH characters", () => {
   const { normalizeName, MAX_TAG_LENGTH } = loadBundle().__internal;
-  assert.equal(MAX_TAG_LENGTH, 32);
+  assert.equal(MAX_TAG_LENGTH, 22);
   assert.equal(normalizeName("a".repeat(MAX_TAG_LENGTH)), "a".repeat(MAX_TAG_LENGTH));
   assert.equal(normalizeName("a".repeat(MAX_TAG_LENGTH + 1)), null);
 });
@@ -93,6 +191,360 @@ test("normalizeColor rejects malformed or non-hex input", () => {
   assert.equal(normalizeColor("#ff00a"), null);
   assert.equal(normalizeColor(""), null);
   assert.equal(normalizeColor(null), null);
+});
+
+// Regression: sanitizeCatalog accepts any string as a tag colour and
+// normalizeColor only guards the write path, so a value that never went
+// through this plugin's UI reached the DOM unvalidated. The browser dropped
+// the whole declaration, leaving a transparent background behind
+// chipStyle's hard-coded `color: "#fff"` -- an invisible chip name.
+test("renderableColor passes hex straight through", () => {
+  const { renderableColor } = loadBundle().__internal;
+  assert.equal(renderableColor("#ef4444"), "#ef4444");
+  assert.equal(renderableColor("#fff"), "#fff");
+  assert.equal(renderableColor("  #ef4444  "), "#ef4444");
+});
+
+test("renderableColor falls back to DEFAULT_COLOR for values that cannot render", () => {
+  const { renderableColor, DEFAULT_COLOR } = loadBundle().__internal;
+  assert.equal(renderableColor(null), DEFAULT_COLOR);
+  assert.equal(renderableColor(42), DEFAULT_COLOR);
+  assert.equal(renderableColor(""), DEFAULT_COLOR);
+  assert.equal(renderableColor("   "), DEFAULT_COLOR);
+});
+
+test("renderableColor defers to the browser's parser: named colours survive, garbage does not", () => {
+  const CSS = { supports: (prop, value) => prop === "color" && value === "red" };
+  const { renderableColor, DEFAULT_COLOR } = loadBundle(null, { CSS }).__internal;
+  // A named colour is a legitimate stored value (older catalogs, imports)
+  // and renders correctly, so it must NOT be reduced to DEFAULT_COLOR.
+  assert.equal(renderableColor("red"), "red");
+  // The CSS-injection payload from QA: the browser rejects the whole
+  // declaration, so the chip would render transparent + white text.
+  assert.equal(
+    renderableColor("red;position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:99999"),
+    DEFAULT_COLOR,
+  );
+});
+
+test("chip styles never emit an unrenderable background", () => {
+  const { chipStyle, denseChipStyle, DEFAULT_COLOR } = loadBundle(null, {
+    CSS: { supports: () => false },
+  }).__internal;
+  assert.equal(chipStyle("not-a-colour").background, DEFAULT_COLOR);
+  assert.equal(denseChipStyle("not-a-colour").background, DEFAULT_COLOR);
+  // The paired text colour is what makes a bad background unreadable.
+  // DEFAULT_COLOR is gray-500, which reads fine in light text.
+  assert.equal(chipStyle("not-a-colour").color, "#ffffff");
+  // Hex still passes through untouched with a parser that rejects everything.
+  assert.equal(chipStyle("#ef4444").background, "#ef4444");
+});
+
+// -----------------------------------------------------------------------
+// resolveRgb / contrastRatio / chipTextColor
+// -----------------------------------------------------------------------
+
+test("resolveRgb parses hex without needing a document", () => {
+  const { resolveRgb } = loadBundle().__internal;
+  assertStructural.deepEqual(resolveRgb("#f00"), { r: 255, g: 0, b: 0, a: 1 });
+  assertStructural.deepEqual(resolveRgb("#ff0000"), { r: 255, g: 0, b: 0, a: 1 });
+  assertStructural.deepEqual(resolveRgb("#ff000080"), { r: 255, g: 0, b: 0, a: 128 / 255 });
+  assertStructural.deepEqual(resolveRgb("#f008"), { r: 255, g: 0, b: 0, a: 136 / 255 });
+});
+
+test("resolveRgb returns null for a non-hex value with no document present", () => {
+  const { resolveRgb } = loadBundle().__internal;
+  assert.equal(resolveRgb("red"), null);
+  assert.equal(resolveRgb("transparent"), null);
+  assert.equal(resolveRgb("currentcolor"), null);
+  assert.equal(resolveRgb(null), null);
+});
+
+test("resolveRgb resolves non-hex colours via a probe canvas when a document is present", () => {
+  const document = makeFakeColorDocument();
+  const { resolveRgb } = loadBundle(null, { document }).__internal;
+  assertStructural.deepEqual(resolveRgb("transparent"), { r: 0, g: 0, b: 0, a: 0 });
+  // A modern colour function: a real canvas paints it but echoes the source
+  // syntax back from `fillStyle`, so only reading the painted *pixel*
+  // resolves it. Greying these out would lose a colour that renders fine.
+  assertStructural.deepEqual(resolveRgb("oklch(0.7 0.1 200)"), { r: 64, g: 177, b: 183, a: 1 });
+});
+
+// Regression (found in QA against a real headless Chromium): a canvas has no
+// element to inherit from, so it *accepts* `currentcolor` and paints it
+// black -- it does not reject it. Measuring that black would keep white chip
+// text while the DOM resolves `background: currentcolor` to the chip's own
+// white label: white on white, the reported bug still open. resolveRgb must
+// refuse the keyword by name rather than trust the canvas, in every casing,
+// and renderableColor must fall back with no parser and no document at all.
+test("resolveRgb refuses currentcolor even when the canvas resolves it to a colour", () => {
+  const document = makeFakeColorDocument();
+  const withDom = loadBundle(null, { CSS: { supports: () => true }, document }).__internal;
+  // The fake canvas models the real one: currentcolor paints black.
+  assertStructural.deepEqual(withDom.resolveRgb("#000000"), { r: 0, g: 0, b: 0, a: 1 });
+  for (const spelling of ["currentcolor", "currentColor", "CURRENTCOLOR", "  currentcolor  "]) {
+    assert.equal(withDom.resolveRgb(spelling), null, spelling);
+    assert.equal(withDom.renderableColor(spelling), withDom.DEFAULT_COLOR, spelling);
+  }
+  assert.equal(withDom.chipStyle("currentcolor").background, withDom.DEFAULT_COLOR);
+  assert.equal(withDom.chipStyle("currentcolor").color, "#ffffff");
+  assert.equal(withDom.denseChipStyle("currentcolor").background, withDom.DEFAULT_COLOR);
+
+  // Unreadable by construction, not merely unmeasurable: no CSS, no document.
+  const bare = loadBundle().__internal;
+  assert.equal(bare.renderableColor("currentcolor"), bare.DEFAULT_COLOR);
+});
+
+// Regression (measured in Chromium): the keyword guard was anchored to the
+// whole value, so `currentcolor` nested inside a colour function slipped
+// past it. The canvas resolves the nesting confidently -- against its own
+// elementless context, i.e. black -- so nothing downstream had reason to
+// doubt it, while the DOM resolves it against the chip's own `color`, which
+// chipStyle sets. Measured before this guard, on both the light and the dark
+// host theme: `color-mix(in srgb, currentcolor 50%, white)` rendered
+// `background: color(srgb 1 1 1)` under `color: #ffffff`, and
+// `rgb(from currentcolor r g b)` did the same -- white text on a white chip,
+// contrast 1.00. That is the reported bug, reached by nesting.
+test("renderableColor refuses currentcolor nested inside a colour function", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { renderableColor, resolveRgb, chipStyle, denseChipStyle, DEFAULT_COLOR } = loadBundle(null, {
+    CSS,
+    document,
+  }).__internal;
+  for (const nested of [
+    "color-mix(in srgb, currentcolor 50%, white)",
+    "color-mix(in srgb, currentColor, #ffffff)",
+    "rgb(from currentcolor r g b)",
+  ]) {
+    // The fake models the measured canvas: these resolve, they are not rejected.
+    assert.equal(resolveRgb(nested), null, nested);
+    assert.equal(renderableColor(nested), DEFAULT_COLOR, nested);
+    assert.equal(chipStyle(nested).background, DEFAULT_COLOR, nested);
+    assert.equal(denseChipStyle(nested).background, DEFAULT_COLOR, nested);
+  }
+  // Token-bounded, so a colour that merely renders fine is not swept up.
+  assert.notEqual(renderableColor("oklch(0.7 0.1 200)"), DEFAULT_COLOR);
+  assert.equal(renderableColor("rgb(1, 2, 3)"), "rgb(1, 2, 3)");
+});
+
+// Regression: resolveRgbViaCanvas detects a rejected `fillStyle` assignment
+// by the value not moving. Probing with a single sentinel makes any colour
+// that legitimately normalizes to that sentinel indistinguishable from a
+// rejection, so a renderable tag colour would silently become DEFAULT_COLOR.
+// Both sentinels are opaque hex, which is what an opaque rgb() normalizes to.
+test("resolveRgb resolves a colour that normalizes onto one of its own probe sentinels", () => {
+  const document = makeFakeColorDocument();
+  const { resolveRgb, renderableColor } = loadBundle(null, { CSS: { supports: () => true }, document }).__internal;
+  assertStructural.deepEqual(resolveRgb("rgb(253, 254, 255)"), { r: 253, g: 254, b: 255, a: 1 });
+  assertStructural.deepEqual(resolveRgb("rgb(1, 2, 3)"), { r: 1, g: 2, b: 3, a: 1 });
+  assert.equal(renderableColor("rgb(253, 254, 255)"), "rgb(253, 254, 255)");
+  assert.equal(renderableColor("rgb(1, 2, 3)"), "rgb(1, 2, 3)");
+});
+
+test("contrastRatio of white vs black is 21, and a colour against itself is 1", () => {
+  const { contrastRatio } = loadBundle().__internal;
+  assert.ok(Math.abs(contrastRatio("#ffffff", "#000000") - 21) < 0.01);
+  assert.ok(Math.abs(contrastRatio("#000000", "#ffffff") - 21) < 0.01);
+  assert.equal(contrastRatio("#3b82f6", "#3b82f6"), 1);
+  assert.equal(contrastRatio("#6b7280", "#6b7280"), 1);
+});
+
+test("chipTextColor picks dark text for pale/low-contrast backgrounds, white otherwise", () => {
+  const { chipTextColor } = loadBundle().__internal;
+  // Yellow, green, orange: unreadable in white today (report's D2 table).
+  assert.equal(chipTextColor("#eab308"), "#111827");
+  assert.equal(chipTextColor("#22c55e"), "#111827");
+  assert.equal(chipTextColor("#f97316"), "#111827");
+  // The pale colour named in the report.
+  assert.equal(chipTextColor("#ffffe0"), "#111827");
+  // The remaining palette entries plus DEFAULT_COLOR stay white.
+  assert.equal(chipTextColor("#ef4444"), "#ffffff");
+  assert.equal(chipTextColor("#3b82f6"), "#ffffff");
+  assert.equal(chipTextColor("#a855f7"), "#ffffff");
+  assert.equal(chipTextColor("#ec4899"), "#ffffff");
+  assert.equal(chipTextColor("#6b7280"), "#ffffff");
+});
+
+test("every PALETTE colour plus DEFAULT_COLOR clears the contrast floor on both chip surfaces", () => {
+  const { chipStyle, denseChipStyle, contrastRatio, PALETTE, DEFAULT_COLOR } = loadBundle().__internal;
+  const colours = PALETTE.concat([DEFAULT_COLOR]);
+  for (const c of colours) {
+    const chip = chipStyle(c);
+    const dense = denseChipStyle(c);
+    assert.ok(
+      contrastRatio(chip.background, chip.color) >= 3,
+      `chipStyle(${c}) contrast ${contrastRatio(chip.background, chip.color)} below 3.0`,
+    );
+    assert.ok(
+      contrastRatio(dense.background, dense.color) >= 3,
+      `denseChipStyle(${c}) contrast ${contrastRatio(dense.background, dense.color)} below 3.0`,
+    );
+  }
+});
+
+// Regression: a fully-transparent background -- reachable via "transparent",
+// "rgba(0,0,0,0)", an 8-digit hex with a zero alpha byte, or "hsla(...,0)" --
+// paired white text renders an invisible chip name. renderableColor must
+// treat alpha-zero as unrenderable, same as an unparseable value.
+test("renderableColor falls back to DEFAULT_COLOR for a fully-transparent colour", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { renderableColor, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
+  assert.equal(renderableColor("rgba(0,0,0,0)"), DEFAULT_COLOR);
+  // #ffffff00 resolves via the hex fast path and needs no document at all.
+  assert.equal(renderableColor("#ffffff00"), DEFAULT_COLOR);
+  assert.equal(renderableColor("hsla(0,0%,0%,0)"), DEFAULT_COLOR);
+});
+
+// Regression: alpha zero is only the degenerate case. A chip background with
+// 0 < alpha < 1 composites with the host surface behind it, so the colour in
+// the catalog is not the colour rendered -- chipTextColor would measure the
+// named one and pair confident text with a chip that is barely there.
+// #00000019 measures as pure black, scores 21 against white, and so kept
+// white text over what renders as roughly #e6e6e6 on a light card: contrast
+// ~1.2, the reported bug reached by degree instead of by kind. The host
+// surface is not readable from here (it is theme-dependent), so anything not
+// fully opaque falls back rather than being composited.
+test("renderableColor falls back to DEFAULT_COLOR for a partially transparent colour", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { renderableColor, chipStyle, denseChipStyle, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
+  for (const translucent of ["#00000019", "#0000001a", "#ffffff40", "#11223344", "#f008", "rgba(0,0,0,0.05)"]) {
+    assert.equal(renderableColor(translucent), DEFAULT_COLOR, translucent);
+    assert.equal(chipStyle(translucent).background, DEFAULT_COLOR, translucent);
+    assert.equal(denseChipStyle(translucent).background, DEFAULT_COLOR, translucent);
+  }
+  // Fully opaque stays untouched, including the alpha-carrying hex spellings.
+  assert.equal(renderableColor("#ffffffff"), "#ffffffff");
+  assert.equal(renderableColor("#f00f"), "#f00f");
+  assert.equal(renderableColor("rgb(1, 2, 3)"), "rgb(1, 2, 3)");
+});
+
+// Where the opacity cutoff actually lands. Alpha is quantised to a byte
+// everywhere it is measured -- both the hex path here and `getImageData` in a
+// browser -- so `0xfe` is the last value distinguishable from opaque and
+// `0xff` is opaque. Confirmed against a real headless Chromium, where
+// `rgba(0,0,0,0.998)` reads back alpha 0.996 (rejected) and
+// `rgba(0,0,0,0.999)` reads back exactly 1 (passes). Locked here because the
+// DOM-less harness is the only place CI can assert it.
+test("the opacity cutoff sits on the alpha byte, not on a fractional threshold", () => {
+  const { renderableColor, DEFAULT_COLOR } = loadBundle().__internal;
+  assert.equal(renderableColor("#000000ff"), "#000000ff");
+  assert.equal(renderableColor("#000000fe"), DEFAULT_COLOR);
+  assert.equal(renderableColor("#00000001"), DEFAULT_COLOR);
+  assert.equal(renderableColor("#00000000"), DEFAULT_COLOR);
+});
+
+// An alpha-carrying hex needs no parser and no document to measure, so it
+// must not depend on the CSS.supports branch -- a host with no `CSS` object
+// skips that branch entirely and previously let #ffffff00 through untouched.
+test("renderableColor rejects a see-through hex with no CSS and no document", () => {
+  const { renderableColor, DEFAULT_COLOR } = loadBundle().__internal;
+  assert.equal(renderableColor("#ffffff00"), DEFAULT_COLOR);
+  assert.equal(renderableColor("#00000019"), DEFAULT_COLOR);
+  assert.equal(renderableColor("#f008"), DEFAULT_COLOR);
+  assert.equal(renderableColor("#ffffffff"), "#ffffffff");
+});
+
+// The invariant relativeLuminance depends on: it ignores alpha, which is only
+// sound because renderableColor has already refused everything translucent.
+test("every background chipStyle emits is fully opaque", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { chipStyle, denseChipStyle, resolveRgb, PALETTE, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
+  const inputs = PALETTE.concat([
+    DEFAULT_COLOR,
+    "#00000019",
+    "#ffffff00",
+    "transparent",
+    "currentcolor",
+    "rgba(0,0,0,0.5)",
+    "not-a-colour",
+    "",
+  ]);
+  for (const input of inputs) {
+    for (const style of [chipStyle(input), denseChipStyle(input)]) {
+      const rgb = resolveRgb(style.background);
+      assert.ok(rgb, `chip background for ${JSON.stringify(input)} did not resolve`);
+      assert.equal(rgb.a, 1, `chip background for ${JSON.stringify(input)} is not opaque`);
+    }
+  }
+});
+
+// Regression (found in QA against a real headless Chromium): a colour the
+// browser renders perfectly well must not be greyed out just because its
+// `fillStyle` serialization is unparseable. Chrome echoes `oklch(...)`,
+// `lab(...)` and `color(display-p3 ...)` back verbatim, so resolveRgb reads
+// the painted pixel instead -- and renderableColor keeps the colour, with a
+// contrast-derived text colour, rather than falling back.
+//
+// It keeps the *colour*, not the authored string: the value comes back as the
+// measured `rgb(...)`, so what the chip paints is what chipTextColor measured
+// (see the system-colour regression below). rgb(64, 177, 183) is the same
+// colour oklch(0.7 0.1 200) renders as on an sRGB display.
+test("renderableColor keeps a modern colour function rather than greying it out", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { renderableColor, chipStyle, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
+  assert.notEqual(renderableColor("oklch(0.7 0.1 200)"), DEFAULT_COLOR);
+  assert.equal(renderableColor("oklch(0.7 0.1 200)"), "rgb(64, 177, 183)");
+  assert.equal(chipStyle("oklch(0.7 0.1 200)").background, "rgb(64, 177, 183)");
+  // rgb(64, 177, 183) scores 2.28 against white, so it takes the dark token.
+  assert.equal(chipStyle("oklch(0.7 0.1 200)").color, "#111827");
+});
+
+// Regression (measured in Chromium): the probe canvas is detached, so it has
+// no `color-scheme` and resolves every CSS system colour in the light scheme.
+// The chip resolves the same keyword against its own inherited scheme, so
+// with the authored value passed through, the contrast pass measured one
+// colour and the browser painted another. Measured under `color-scheme: dark`
+// with pass-through, versus the hard-coded white this branch replaced:
+//
+//   Canvas      18.73 -> 1.06   (#111827 text on rgb(18,18,18))
+//   Field       11.20 -> 1.58
+//   CanvasText   1.00 -> 1.00   (already broken)
+//
+// Handing back the measured rgb() binds the painted colour to the measured
+// one, so the chip is legible on both themes -- and it needs no list of
+// system-colour keywords, which differ per browser.
+test("renderableColor normalizes a context-dependent colour to what it measured", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { renderableColor, chipStyle, contrastRatio } = loadBundle(null, { CSS, document }).__internal;
+  // The fake models the measured canvas: system colours resolve light-scheme.
+  assert.equal(renderableColor("Canvas"), "rgb(255, 255, 255)");
+  assert.equal(renderableColor("CanvasText"), "rgb(0, 0, 0)");
+  for (const systemColour of ["Canvas", "CanvasText", "Field"]) {
+    const chip = chipStyle(systemColour);
+    // No longer a keyword, so it cannot re-resolve against the chip's theme.
+    assert.ok(/^rgb\(\d+, \d+, \d+\)$/.test(chip.background), `${systemColour} -> ${chip.background}`);
+    assert.ok(
+      contrastRatio(chip.background, chip.color) >= 3,
+      `${systemColour} contrast ${contrastRatio(chip.background, chip.color)} below 3.0`,
+    );
+  }
+  // Normalising is idempotent on a colour already in that form.
+  assert.equal(renderableColor("rgb(1, 2, 3)"), "rgb(1, 2, 3)");
+});
+
+// The regression case from the report: a transparent chip renders invisible
+// on the light theme. Both chip surfaces must fall back to a legible gray
+// chip, and DEFAULT_COLOR reads fine in white text.
+test("chip styles fall back to a legible chip for a transparent background (AC1)", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { chipStyle, denseChipStyle, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
+  assert.equal(chipStyle("transparent").background, DEFAULT_COLOR);
+  assert.equal(chipStyle("transparent").color, "#ffffff");
+  assert.equal(denseChipStyle("transparent").background, DEFAULT_COLOR);
+  assert.equal(denseChipStyle("transparent").color, "#ffffff");
+});
+
+test("chipStyle is unchanged for a colour that already reads fine (AC8)", () => {
+  const { chipStyle } = loadBundle().__internal;
+  assert.equal(chipStyle("#ef4444").background, "#ef4444");
+  assert.equal(chipStyle("#ef4444").color, "#ffffff");
 });
 
 // -----------------------------------------------------------------------
@@ -231,6 +683,23 @@ test("resolveTag falls back to a legacy plain-string tag (id as name, DEFAULT_CO
   const { resolveTag, DEFAULT_COLOR } = loadBundle().__internal;
   const resolved = resolveTag([], "urgent");
   assertStructural.deepEqual(resolved, { id: "urgent", name: "urgent", color: DEFAULT_COLOR });
+});
+
+test("resolveTag returns null for an unresolved id shaped like a generated catalog id (an orphaned/deleted tag)", () => {
+  const { resolveTag, makeTagId } = loadBundle().__internal;
+  const orphanId = makeTagId();
+  assert.equal(resolveTag([], orphanId), null);
+  // Still null even when other, unrelated catalog entries exist.
+  assert.equal(resolveTag([{ id: "t1", name: "bug", color: "#fff" }], orphanId), null);
+});
+
+test("resolveTag still resolves a legacy plain-string id that happens not to match the generated-id shape", () => {
+  const { resolveTag, DEFAULT_COLOR } = loadBundle().__internal;
+  assertStructural.deepEqual(resolveTag([], "my custom tag"), {
+    id: "my custom tag",
+    name: "my custom tag",
+    color: DEFAULT_COLOR,
+  });
 });
 
 // -----------------------------------------------------------------------
@@ -434,11 +903,253 @@ test("bundle registers the task-card-tags slot, the main-top-bar button, and the
     host,
   );
   assert.ok(registered.components.some((c) => c.slot === "task-card-tags"));
+  assert.ok(registered.components.some((c) => c.slot === "task-row-tags"));
   assert.ok(registered.components.some((c) => c.slot === "main-top-bar"));
   const addTagAction = registered.menuActions.find((a) => a.id === "add-tag");
   assert.ok(addTagAction, "registers an add-tag menu action");
   // Flat, top-level item -- shipped in kdlbs/kandev PR #2351.
   assert.equal(addTagAction.group, "primary");
+});
+
+// -----------------------------------------------------------------------
+// task-row-tags: dense, non-removable chip row for the sidebar row and the
+// /tasks list row.
+// -----------------------------------------------------------------------
+
+test("task-row-tags renders chips with no remove control", async () => {
+  const plugin = loadBundle();
+  let TaskRowTags;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "task") return Promise.resolve({ value: ["t1"], updatedAt: "t0" });
+      return Promise.resolve({ value: [{ id: "t1", name: "urgent", color: "#ef4444" }], updatedAt: "t0" });
+    },
+    subscribe: () => () => {},
+  };
+  plugin.initialize(
+    {
+      registerComponent(slot, Component) {
+        if (slot === "task-row-tags") TaskRowTags = Component;
+      },
+      registerTaskMenuAction() {},
+    },
+    fakeHost,
+  );
+  assert.ok(TaskRowTags, "task-row-tags component registered");
+
+  const getTree = fakeHost.mount(TaskRowTags, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
+  await flush();
+
+  const row = getTree();
+  const chip = row.children[0][0];
+  assert.equal(chip.children[0], "urgent");
+  assert.equal(chip.children.length, 1, "no remove button child on a task-row-tags chip");
+});
+
+test("task-row-tags caps at 3 visible chips and shows a +N indicator beyond the cap", async () => {
+  const plugin = loadBundle();
+  let TaskRowTags;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  const catalog = Array.from({ length: 5 }, (_, i) => ({ id: "t" + i, name: "tag" + i, color: "#ef4444" }));
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "task") return Promise.resolve({ value: catalog.map((t) => t.id), updatedAt: "t0" });
+      return Promise.resolve({ value: catalog, updatedAt: "t0" });
+    },
+    subscribe: () => () => {},
+  };
+  plugin.initialize(
+    {
+      registerComponent(slot, Component) {
+        if (slot === "task-row-tags") TaskRowTags = Component;
+      },
+      registerTaskMenuAction() {},
+    },
+    fakeHost,
+  );
+
+  const getTree = fakeHost.mount(TaskRowTags, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
+  await flush();
+
+  const row = getTree();
+  const chips = row.children[0];
+  assert.equal(chips.length, 3, "caps at 3 visible chips");
+  const more = row.children[1];
+  assert.ok(more, "renders a +N indicator when there are more than 3 tags");
+  assert.equal(more.children[0], "+2");
+});
+
+test("task-row-tags shows no +N indicator at or under the 3-chip cap", async () => {
+  const plugin = loadBundle();
+  let TaskRowTags;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  const catalog = [{ id: "t1", name: "urgent", color: "#ef4444" }];
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "task") return Promise.resolve({ value: ["t1"], updatedAt: "t0" });
+      return Promise.resolve({ value: catalog, updatedAt: "t0" });
+    },
+    subscribe: () => () => {},
+  };
+  plugin.initialize(
+    {
+      registerComponent(slot, Component) {
+        if (slot === "task-row-tags") TaskRowTags = Component;
+      },
+      registerTaskMenuAction() {},
+    },
+    fakeHost,
+  );
+
+  const getTree = fakeHost.mount(TaskRowTags, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
+  await flush();
+
+  const row = getTree();
+  assert.equal(row.children[1], null, "no +N indicator under the cap");
+});
+
+// -----------------------------------------------------------------------
+// Shared data layer: catalog + task-tags stores dedupe concurrent reads
+// and subscriptions across every mounted chip-row/dropdown surface.
+// -----------------------------------------------------------------------
+
+test("shared data layer: two independently-mounted chip rows for the same task share one coalesced storage.get", async () => {
+  const plugin = loadBundle();
+  const { makeTagChips } = plugin.__internal;
+
+  const calls = { taskGet: 0 };
+  const sharedStorage = {
+    get(scope) {
+      if (scope === "task") {
+        calls.taskGet += 1;
+        return Promise.resolve({ value: ["t1"], updatedAt: "t0" });
+      }
+      return Promise.resolve({ value: [{ id: "t1", name: "urgent", color: "#ef4444" }], updatedAt: "t0" });
+    },
+    subscribe: () => () => {},
+  };
+  const sharedStore = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+
+  const hostA = makeFakeReactHost();
+  hostA.store = sharedStore;
+  hostA.storage = sharedStorage;
+  const TagChipsA = makeTagChips(hostA, { removable: true });
+
+  const hostB = makeFakeReactHost();
+  hostB.store = sharedStore;
+  hostB.storage = sharedStorage;
+  const TagChipsB = makeTagChips(hostB, { removable: true });
+
+  const getTreeA = hostA.mount(TagChipsA, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
+  const getTreeB = hostB.mount(TagChipsB, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
+  await flush();
+
+  assert.equal(calls.taskGet, 1, "one coalesced storage.get for the shared task's tags, across two mounted rows");
+  assert.ok(getTreeA(), "row A rendered");
+  assert.ok(getTreeB(), "row B rendered");
+});
+
+test("shared data layer: N mounted rows for the same workspace share exactly one catalog fetch and one subscribe", async () => {
+  const plugin = loadBundle();
+  const { makeTagChips } = plugin.__internal;
+
+  const calls = { workspaceGet: 0, workspaceSubscribe: 0 };
+  const sharedStorage = {
+    get(scope) {
+      if (scope === "workspace") calls.workspaceGet += 1;
+      if (scope === "task") return Promise.resolve({ value: [], updatedAt: "t0" });
+      return Promise.resolve({ value: [{ id: "t1", name: "urgent", color: "#ef4444" }], updatedAt: "t0" });
+    },
+    subscribe(descriptor) {
+      if (descriptor.scope === "workspace") calls.workspaceSubscribe += 1;
+      return () => {};
+    },
+  };
+  const sharedStore = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+
+  const hosts = [0, 1, 2].map(() => {
+    const h = makeFakeReactHost();
+    h.store = sharedStore;
+    h.storage = sharedStorage;
+    return h;
+  });
+  const components = hosts.map((h) => makeTagChips(h, { removable: true }));
+
+  hosts.forEach((h, i) => {
+    h.mount(components[i], { slotProps: { taskId: "task-" + i, workspaceId: "ws-1" } });
+  });
+  await flush();
+
+  assert.equal(calls.workspaceGet, 1, "one coalesced catalog fetch shared across 3 mounted rows");
+  assert.equal(calls.workspaceSubscribe, 1, "one catalog subscribe shared across 3 mounted rows");
+});
+
+test("shared data layer: a change arriving mid-flight re-fetches instead of being swallowed by the coalescing", async () => {
+  const plugin = loadBundle();
+  const { makeTagChips } = plugin.__internal;
+
+  // The first response is what a `get` issued *before* the other tab's write
+  // returns -- already stale by the time it resolves. The second is what that
+  // write actually stored.
+  const taskResponses = [
+    { value: ["t1"], updatedAt: "t0" },
+    { value: ["t1", "t2"], updatedAt: "t1" },
+  ];
+  const resolvers = [];
+  const calls = { taskGet: 0 };
+  let taskSubscriber = null;
+
+  const host = makeFakeReactHost();
+  host.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  host.storage = {
+    get(scope) {
+      if (scope !== "task") {
+        return Promise.resolve({
+          value: [
+            { id: "t1", name: "urgent", color: "#ef4444" },
+            { id: "t2", name: "docs", color: "#22c55e" },
+          ],
+          updatedAt: "t0",
+        });
+      }
+      const i = calls.taskGet++;
+      return new Promise((resolve) => resolvers.push(() => resolve(taskResponses[i])));
+    },
+    subscribe(descriptor, handler) {
+      if (descriptor.scope === "task") taskSubscriber = handler;
+      return () => {};
+    },
+  };
+
+  const getTree = host.mount(makeTagChips(host, { removable: false, dense: true }), {
+    slotProps: { taskId: "task-1", workspaceId: "ws-1" },
+  });
+  await flush();
+  assert.equal(calls.taskGet, 1, "mounting issued the first get");
+
+  // Another tab writes task-1's tags while that first get is still in flight.
+  taskSubscriber({ scope: "task", scopeId: "task-1", key: "tags" });
+  assert.equal(calls.taskGet, 1, "the notification joins the in-flight get rather than racing a second one");
+
+  resolvers[0](); // the stale response lands
+  await flush();
+  assert.equal(calls.taskGet, 2, "settling with a pending invalidation re-issues the get");
+  resolvers[1]();
+  await flush();
+
+  const chipNames = getTree()
+    .children.flat()
+    .filter(Boolean)
+    .map((chip) => chip.children[0]);
+  assertStructural.deepEqual(
+    chipNames,
+    ["urgent", "docs"],
+    "the row settles on the post-write value, not the stale in-flight one",
+  );
 });
 
 test("the add-tag menu action carries a tag svg icon at mr-2 h-4 w-4, matching its neighbours", () => {
@@ -595,6 +1306,45 @@ test("registerTaskFilter registers even when activeWorkspaceId isn't set yet, an
   assert.ok(optionValues.includes("__untagged__"));
 });
 
+test("task filter options carry a renderable colour", async () => {
+  // The host paints an option's `color` onto a swatch, so it needs the same
+  // guard the chips have: an unparseable stored colour would render blank.
+  const plugin = loadBundle(null, { CSS: { supports: () => false } });
+  const { DEFAULT_COLOR } = plugin.__internal;
+  let filterRegistration = null;
+  const host = makeMinimalHost({
+    store: { getState: () => ({ workspaces: { activeId: "ws-1" } }), subscribe: () => () => {} },
+    storage: {
+      get: (scope, scopeId, key) =>
+        scope === "workspace" && key === "tags-catalog"
+          ? Promise.resolve({
+              value: [
+                { id: "t1", name: "urgent", color: "#ef4444" },
+                { id: "t2", name: "broken", color: "not-a-colour" },
+              ],
+              updatedAt: "t0",
+            })
+          : Promise.resolve(undefined),
+      subscribe: () => () => {},
+    },
+  });
+  plugin.initialize(
+    {
+      registerComponent() {},
+      registerTaskMenuAction() {},
+      registerTaskFilter(registration) {
+        filterRegistration = registration;
+      },
+    },
+    host,
+  );
+  await flush();
+
+  const byValue = Object.fromEntries(filterRegistration.getOptions().map((o) => [o.value, o.color]));
+  assert.equal(byValue.t1, "#ef4444", "a hex colour is passed through untouched");
+  assert.equal(byValue.t2, DEFAULT_COLOR, "an unparseable colour falls back");
+});
+
 // -----------------------------------------------------------------------
 // Lifecycle: disposal on destroy(), idempotent initialize(), cache eviction
 // -----------------------------------------------------------------------
@@ -673,6 +1423,78 @@ test("initialize twice without an intervening destroy still leaves one set of li
   const afterFirst = host.counts();
   plugin.initialize(makeFullRegistry(), host);
   assert.deepEqual(host.counts(), afterFirst, "re-initializing drains stale disposables before registering new ones");
+});
+
+test("a re-entrant initialize() (no destroy) re-subscribes and re-fetches the shared stores instead of serving a dead cache", async () => {
+  const plugin = loadBundle();
+  const calls = { taskGet: 0, taskSubscribe: 0, catalogSubscribe: 0 };
+  let liveSubscriptions = 0;
+
+  const sharedStore = { getState: () => ({ workspaces: { activeId: "ws-1" } }), subscribe: () => () => {} };
+  const sharedStorage = {
+    get(scope) {
+      if (scope === "task") {
+        calls.taskGet += 1;
+        return Promise.resolve({ value: ["t1"], updatedAt: "t0" });
+      }
+      return Promise.resolve({ value: [{ id: "t1", name: "urgent", color: "#ef4444" }], updatedAt: "t0" });
+    },
+    subscribe(descriptor) {
+      if (descriptor.scope === "task") calls.taskSubscribe += 1;
+      if (descriptor.scope === "workspace") calls.catalogSubscribe += 1;
+      liveSubscriptions += 1;
+      return () => {
+        liveSubscriptions -= 1;
+      };
+    },
+  };
+
+  /** Registers against a fresh fake-React host, returning that load's task-row-tags component. */
+  function loadAgainst() {
+    const host = makeFakeReactHost();
+    host.store = sharedStore;
+    host.storage = sharedStorage;
+    const components = {};
+    plugin.initialize(
+      {
+        registerComponent(name, Component) {
+          components[name] = Component;
+        },
+        registerTaskMenuAction() {},
+      },
+      host,
+    );
+    return { host, RowTags: components["task-row-tags"] };
+  }
+
+  const first = loadAgainst();
+  const firstTree = first.host.mount(first.RowTags, {
+    slotProps: { taskId: "task-1", workspaceId: "ws-1" },
+  });
+  await flush();
+  assert.equal(calls.taskSubscribe, 1, "the first mount opened the wide task-tags subscription");
+  assert.equal(calls.taskGet, 1);
+  assert.ok(firstTree(), "the first row rendered its chips");
+
+  // The host re-runs initialize() without a matching unloadPlugin()/destroy()
+  // -- a boot race, a dev HMR re-boot, or a fresh store instance; see
+  // apps/web/lib/plugins/host.ts's "Idempotent (re)load" comment. That drains
+  // the disposables, which is what unsubscribed the shared stores, so the
+  // stores have to be reset with them: otherwise their one-shot subscription
+  // guards stay set (nothing ever resubscribes) and `loaded` stays true
+  // (nothing ever refetches), and every chip surface serves the pre-drain
+  // cache with no live updates until a full page reload.
+  const second = loadAgainst();
+  const secondTree = second.host.mount(second.RowTags, {
+    slotProps: { taskId: "task-1", workspaceId: "ws-1" },
+  });
+  await flush();
+
+  assert.equal(calls.taskSubscribe, 2, "the re-entrant load opened a fresh wide task-tags subscription");
+  assert.equal(calls.catalogSubscribe, 2, "and a fresh catalog subscription");
+  assert.equal(calls.taskGet, 2, "and refetched rather than serving the now-unsubscribed cache");
+  assert.equal(liveSubscriptions, 2, "one wide task-tags + one catalog subscription live, not four");
+  assert.ok(secondTree(), "the row after the re-entrant load still renders its chips");
 });
 
 test("after destroy, a store-state change triggers zero further storage.get calls", () => {
@@ -944,6 +1766,69 @@ test("TagChips falls back to legacy plain-string tags (unresolved id) with DEFAU
   const chip = row.children[0][0];
   assert.equal(chip.children[0], "legacy-tag");
   assert.equal(chip.props.style.background, DEFAULT_COLOR);
+});
+
+test("TagChips skips a generated-shape unresolved (orphaned/deleted) tag id, rendering no chip for it", async () => {
+  const plugin = loadBundle();
+  const { makeTagId } = plugin.__internal;
+  let TagChips;
+  const orphanId = makeTagId();
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "task") return Promise.resolve({ value: [orphanId, "t1"], updatedAt: "t0" });
+      return Promise.resolve({ value: [{ id: "t1", name: "urgent", color: "#ef4444" }], updatedAt: "t0" });
+    },
+    subscribe: () => () => {},
+  };
+  plugin.initialize(
+    {
+      registerComponent(slot, Component) {
+        if (slot === "task-card-tags") TagChips = Component;
+      },
+      registerTaskMenuAction() {},
+    },
+    fakeHost,
+  );
+
+  const getTree = fakeHost.mount(TagChips, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
+  await flush();
+
+  const row = getTree();
+  assert.ok(row, "still renders since one tag (t1) resolves");
+  const chips = row.children[0];
+  assert.equal(chips.length, 1, "the orphaned generated-id tag renders no chip");
+  assert.equal(chips[0].children[0], "urgent");
+});
+
+test("TagChips renders nothing when every applied tag id is an orphaned generated-shape id", async () => {
+  const plugin = loadBundle();
+  const { makeTagId } = plugin.__internal;
+  let TagChips;
+  const orphanId = makeTagId();
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "task") return Promise.resolve({ value: [orphanId], updatedAt: "t0" });
+      return Promise.resolve({ value: [], updatedAt: "t0" });
+    },
+    subscribe: () => () => {},
+  };
+  plugin.initialize(
+    {
+      registerComponent(slot, Component) {
+        if (slot === "task-card-tags") TagChips = Component;
+      },
+      registerTaskMenuAction() {},
+    },
+    fakeHost,
+  );
+
+  const getTree = fakeHost.mount(TagChips, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
+  await flush();
+  assert.equal(getTree(), null);
 });
 
 test("TagChips renders nothing while loading or when there are no tags", async () => {
@@ -1233,7 +2118,145 @@ test("TagsTopBarDropdown: clicking a tag's pill enters rename mode; committing r
   assert.ok(errorNode, "renaming to a clashing name surfaces an error");
 });
 
-test("TagsTopBarDropdown: each row has a color swatch that recolors the tag on blur", async () => {
+// -----------------------------------------------------------------------
+// Tags box (top-right dropdown): trigger/content sizing, row grid layout,
+// and the swatch-button + Update/Cancel color picker redesign.
+// -----------------------------------------------------------------------
+
+test("Tags box trigger uses size icon-lg and the dropdown content is TOPBAR_WIDTH wide", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  const tree = getTree();
+  const trigger = tree.children[0].children[0];
+  assert.equal(trigger.props.size, "icon-lg");
+
+  const content = tree.children[1];
+  const { TOPBAR_WIDTH } = plugin.__internal;
+  // An inline width, not a `w-[...]` class: Tailwind only emits an
+  // arbitrary-value utility for literals it finds in source it scans, and the
+  // host does not scan this bundle (see the TOPBAR_WIDTH comment).
+  assert.equal(content.props.style.width, TOPBAR_WIDTH + "px");
+  assert.doesNotMatch(content.props.className, /w-\[/);
+});
+
+test("Tags box: a full-length tag name fits the Create input with no horizontal scroll", () => {
+  // Regression test for the QA finding: the box was 320px with a 32-character
+  // limit, which left 222px of input for a name needing up to ~373px, so an
+  // ordinary 32-character name scrolled horizontally. The three constants are
+  // one budget; this asserts the budget still closes.
+  const { MAX_TAG_LENGTH, TOPBAR_WIDTH, CREATE_BUTTON_WIDTH } = loadBundle().__internal;
+
+  const BOX_PADDING = 16; // p-2, both sides
+  const ROW_PADDING = 16; // the Create row's `padding: "4px 8px"`, both sides
+  const GAP = 6; // the Create row's flex gap
+  const inputWidth = TOPBAR_WIDTH - BOX_PADDING - ROW_PADDING - CREATE_BUTTON_WIDTH - GAP;
+
+  // The text scrolls against the input's *content* box, not its border box,
+  // so the host Input's own chrome comes out too: `px-2` (8px a side) plus a
+  // 1px border. Confirmed live -- a 282px input reports clientWidth 280.
+  // Leaving it in made the budget look 18px roomier than it is, enough to
+  // wave through a MAX_TAG_LENGTH the box cannot actually hold.
+  const INPUT_CHROME = 18;
+  const textWidth = inputWidth - INPUT_CHROME;
+
+  // Calibration, measured in Chrome at the input's computed 12px font:
+  //   app font (self-hosted Figtree)      widest ASCII glyph 'm' = 11.22px
+  //   fallback stack (Segoe UI / Arial)   widest ASCII glyph '@' = 12.18px
+  // The plugin does not control which of those renders -- Figtree is
+  // self-hosted, so the fallback only shows during the font-load window, but
+  // the name must not scroll then either. 12 sits just under the fallback's
+  // worst glyph and well above the app font's, which is the bound worth
+  // holding: it keeps MAX_TAG_LENGTH at a value that survives both. Raising
+  // the cap to 23 fits the app font (258px) but not the fallback (280px),
+  // and this test is meant to fail in that case rather than ship a name
+  // length that scrolls for some users.
+  const WORST_CASE_PX_PER_CHAR = 12;
+  const worstCaseName = MAX_TAG_LENGTH * WORST_CASE_PX_PER_CHAR;
+
+  assert.ok(
+    worstCaseName <= textWidth,
+    `a ${MAX_TAG_LENGTH}-char name needs up to ${worstCaseName}px but the Create input only fits ${textWidth}px ` +
+      `of text (TOPBAR_WIDTH=${TOPBAR_WIDTH}, CREATE_BUTTON_WIDTH=${CREATE_BUTTON_WIDTH}) — it would scroll horizontally`,
+  );
+});
+
+test("Tags box: the Create row's input can grow (flex:1, minWidth:0) and the Create button has a fixed width", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  const content = getTree().children[1];
+  const createRow = content.children[2];
+  assert.equal(createRow.props.style.display, "flex");
+  assert.equal(createRow.props.style.gap, "6px");
+  const [inputEl, buttonEl] = createRow.children;
+  assert.equal(inputEl.props.style.flex, 1);
+  assert.equal(inputEl.props.style.minWidth, 0);
+  assert.equal(buttonEl.props.style.flexShrink, 0, "Create button keeps a fixed width, unaffected by the name's length");
+});
+
+test("Tags box: each row is a CSS grid, and the delete button is a fixed 20x20 control (fixes the misaligned x)", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [
+    { id: "t1", name: "a-considerably-longer-tag-name", color: "#ef4444" },
+    { id: "t2", name: "x", color: "#3b82f6" },
+  ]);
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  const rows = getTree().children[1].children[4];
+  rows.forEach((row) => {
+    assert.equal(row.props.style.display, "grid");
+    assert.equal(row.props.style.gridTemplateColumns, "20px 1fr 24px");
+    const deleteButton = row.children[3];
+    assert.equal(deleteButton.props["data-testid"], "kandev-tags-topbar-delete");
+    assert.equal(deleteButton.props.style.width, "20px");
+    assert.equal(deleteButton.props.style.height, "20px");
+  });
+});
+
+test("Tags box: Tier 2 (filterSelectionApi) rows use a 4-column grid with a 16px checkbox column", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [{ id: "t1", name: "urgent", color: "#ef4444" }]);
+  fakeHost.taskFilters = makeFakeTaskFilters();
+
+  const capabilities = { taskFilter: true, filterSelectionApi: true, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  const rows = getTree().children[1].children[4];
+  assert.equal(rows[0].props.style.gridTemplateColumns, "20px 16px 1fr 24px");
+});
+
+test("Tags box color picker: the swatch is a button; clicking it opens a picker box beneath the row", async () => {
   const plugin = loadBundle();
   const { makeTagsTopBarDropdown } = plugin.__internal;
   const fakeHost = makeFakeReactHost();
@@ -1246,19 +2269,178 @@ test("TagsTopBarDropdown: each row has a color swatch that recolors the tag on b
   const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
   await flush();
 
-  let tree = getTree();
-  let rows = tree.children[1].children[4];
-  const colorSwatch = rows[0].children[0];
-  assert.equal(colorSwatch.props.type, "color");
-  assert.equal(colorSwatch.props.defaultValue, "#ef4444");
+  let rows = getTree().children[1].children[4];
+  const swatch = rows[0].children[0];
+  assert.equal(swatch.props["data-testid"], "kandev-tags-topbar-color-swatch");
+  assert.equal(swatch.props.style.background, "#ef4444");
+  assert.equal(rows.length, 1, "no picker box before the swatch is clicked");
 
-  colorSwatch.props.onBlur({ target: { value: "#00ff00" } });
+  swatch.props.onClick();
+  await flush();
+
+  rows = getTree().children[1].children[4];
+  assert.equal(rows.length, 2, "the picker box is inserted directly beneath the row");
+  assert.equal(rows[1].props["data-testid"], "kandev-tags-topbar-color-picker");
+});
+
+test("Tags box color picker: picking a palette swatch or typing a hex updates only local state, no storage.set", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [{ id: "t1", name: "bug", color: "#ef4444" }]);
+  let setCalls = 0;
+  const originalSet = fakeHost.storage.set.bind(fakeHost.storage);
+  fakeHost.storage.set = (...args) => {
+    setCalls += 1;
+    return originalSet(...args);
+  };
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  let rows = getTree().children[1].children[4];
+  rows[0].children[0].props.onClick(); // open the picker
+  await flush();
+
+  rows = getTree().children[1].children[4];
+  const picker = rows[1];
+  const paletteRow = picker.children[0];
+  paletteRow.children[1].props.onClick(); // pick the 2nd palette swatch
+  await flush();
+  assert.equal(setCalls, 0, "picking a palette swatch issues no storage write");
+
+  const hexInput = picker.children[1].children[0];
+  assert.equal(hexInput.props.type, "color");
+  hexInput.props.onChange({ target: { value: "#00ff00" } });
+  await flush();
+  assert.equal(setCalls, 0, "typing a hex issues no storage write");
+
+  rows = getTree().children[1].children[4];
+  const preview = rows[1].children[1].children[1];
+  assert.equal(preview.props["data-testid"], "kandev-tags-topbar-color-preview");
+  assert.equal(preview.props.style.background, "#00ff00", "the preview pill reflects the latest pending color");
+});
+
+test("Tags box color picker: Update writes the catalog exactly once with the pending color, then closes the picker", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown, PALETTE } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [{ id: "t1", name: "bug", color: "#ef4444" }]);
+  let setCalls = 0;
+  const originalSet = fakeHost.storage.set.bind(fakeHost.storage);
+  fakeHost.storage.set = (...args) => {
+    setCalls += 1;
+    return originalSet(...args);
+  };
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  let rows = getTree().children[1].children[4];
+  rows[0].children[0].props.onClick();
+  await flush();
+
+  rows = getTree().children[1].children[4];
+  rows[1].children[0].children[1].props.onClick(); // pick PALETTE[1]
+  await flush();
+
+  rows = getTree().children[1].children[4];
+  const [cancelButton, updateButton] = rows[1].children[2].children;
+  assert.equal(cancelButton.props["data-testid"], "kandev-tags-topbar-color-cancel");
+  assert.equal(updateButton.props["data-testid"], "kandev-tags-topbar-color-update");
+  updateButton.props.onClick();
   await flush();
   await flush();
 
-  tree = getTree();
-  rows = tree.children[1].children[4];
-  assert.equal(rows[0].children[0].props.defaultValue, "#00ff00", "the catalog reflects the new color");
+  assert.equal(setCalls, 1, "exactly one catalog write on Update");
+
+  rows = getTree().children[1].children[4];
+  assert.equal(rows.length, 1, "the picker closes after Update");
+  assert.equal(rows[0].children[0].props.style.background, PALETTE[1], "the swatch reflects the newly committed color");
+});
+
+test("Tags box color picker: Cancel discards the pending color, issues no write, and leaves the swatch unchanged", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [{ id: "t1", name: "bug", color: "#ef4444" }]);
+  let setCalls = 0;
+  const originalSet = fakeHost.storage.set.bind(fakeHost.storage);
+  fakeHost.storage.set = (...args) => {
+    setCalls += 1;
+    return originalSet(...args);
+  };
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  let rows = getTree().children[1].children[4];
+  rows[0].children[0].props.onClick();
+  await flush();
+
+  rows = getTree().children[1].children[4];
+  rows[1].children[0].children[1].props.onClick(); // pick a different palette color (pending only)
+  await flush();
+
+  rows = getTree().children[1].children[4];
+  const [cancelButton] = rows[1].children[2].children;
+  cancelButton.props.onClick();
+  await flush();
+
+  assert.equal(setCalls, 0, "Cancel issues no storage write");
+
+  rows = getTree().children[1].children[4];
+  assert.equal(rows.length, 1, "the picker closes after Cancel");
+  assert.equal(rows[0].children[0].props.style.background, "#ef4444", "the swatch color is unchanged from before the picker opened");
+});
+
+test("Tags box color picker: only one row's picker may be open at a time", async () => {
+  const plugin = loadBundle();
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = makeEchoSuppressingStorage();
+  await fakeHost.storage.set("workspace", "ws-1", "tags-catalog", [
+    { id: "t1", name: "bug", color: "#ef4444" },
+    { id: "t2", name: "urgent", color: "#3b82f6" },
+  ]);
+
+  const capabilities = { taskFilter: false, filterSelectionApi: false, scanStorage: false };
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, capabilities);
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  await flush();
+
+  let rows = getTree().children[1].children[4];
+  rows[0].children[0].props.onClick(); // open t1's picker
+  await flush();
+
+  rows = getTree().children[1].children[4];
+  const pickersAfterFirst = rows.filter((r) => r.props && r.props["data-testid"] === "kandev-tags-topbar-color-picker");
+  assert.equal(pickersAfterFirst.length, 1);
+
+  const t2Row = rows.find(
+    (r) => r.props && r.props["data-testid"] === "kandev-tags-topbar-row" && r.children[2].children[0] === "urgent",
+  );
+  t2Row.children[0].props.onClick(); // open t2's picker
+  await flush();
+
+  rows = getTree().children[1].children[4];
+  const pickersAfterSecond = rows.filter((r) => r.props && r.props["data-testid"] === "kandev-tags-topbar-color-picker");
+  assert.equal(pickersAfterSecond.length, 1, "opening a second row's picker closes the first");
+  const openPicker = pickersAfterSecond[0];
+  assert.match(openPicker.props.key, /^t2-/, "the still-open picker belongs to t2, not t1");
 });
 
 test("regression: TagsTopBarDropdown has its own Create input, independent of the Add-tags modal (AC2)", async () => {
