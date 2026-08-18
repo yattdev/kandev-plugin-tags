@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.6] - 2026-08-13
+
+### Fixed
+
+- Tag chips no longer hard-code white text: `chipStyle`/`denseChipStyle` now
+  pick between white and a dark (`#111827`) token from the resolved
+  background's WCAG contrast ratio. Yellow (`#eab308`), green (`#22c55e`),
+  and orange (`#f97316`) now use dark text; the other palette colours and
+  `DEFAULT_COLOR` retain white text.
+- `renderableColor` rejects transparent or partially transparent backgrounds,
+  `currentcolor` (including nested uses), and values the browser cannot
+  resolve, falling back to the legible default gray.
+- Non-hex colours are painted as the RGB value measured by the probe canvas,
+  so theme-dependent CSS system colours and the contrast-derived text colour
+  cannot resolve in different contexts. Modern colour functions remain
+  supported, but are rendered in their measured sRGB form.
+
 ## [0.5.5] - 2026-08-12
 
 ### Fixed

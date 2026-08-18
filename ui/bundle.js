@@ -130,6 +130,35 @@
 
   var HEX_COLOR_RE = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i;
 
+  // Chip text tokens (Tailwind white / gray-900) and the WCAG contrast floor
+  // a background must clear to keep white text -- see chipTextColor.
+  var CHIP_TEXT_LIGHT = "#ffffff";
+  var CHIP_TEXT_DARK = "#111827";
+  var CHIP_TEXT_MIN_CONTRAST = 3;
+
+  // 3/4/6/8-digit hex, the 4/8-digit forms carrying an alpha channel --
+  // wider than HEX_COLOR_RE (which only covers what normalizeColor writes)
+  // because resolveRgb also has to measure alpha on values that arrive by
+  // other routes (imports, legacy catalogs, host.storage).
+  var HEX_RGBA_RE = /^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+
+  // `currentcolor` names the element's *own* `color`, so as a chip
+  // background it resolves to the chip's own label colour: an unreadable
+  // chip by construction, whatever text colour is paired with it. It is
+  // also the one value the probe canvas answers wrongly rather than
+  // rejecting (it has no element to inherit from, so it paints black), so
+  // it has to be caught by name before any measurement is attempted.
+  //
+  // Matched as an ident token *anywhere* in the value rather than as the
+  // whole value: nested in `color-mix()` or in relative colour syntax the
+  // keyword carries the same self-reference, and the canvas resolves it just
+  // as confidently. Measured in Chromium against the whole-value-only form,
+  // both `color-mix(in srgb, currentcolor 50%, white)` (canvas: mid gray,
+  // DOM: `color(srgb 1 1 1)`) and `rgb(from currentcolor r g b)` (canvas:
+  // black, DOM: white) rendered a white chip carrying white text -- contrast
+  // 1.00, on both the light and the dark host theme.
+  var CURRENT_COLOR_RE = /(^|[^\w-])currentcolor([^\w-]|$)/i;
+
   var CHIP_ROW_STYLE = { display: "flex", flexWrap: "wrap", gap: "4px", alignItems: "center" };
   var CHIP_REMOVE_BUTTON_STYLE = {
     display: "inline-flex",
@@ -157,44 +186,287 @@
     flexShrink: 0,
   };
 
+  var resolveRgbCache = new Map();
+  var probeCanvasCtx; // lazily created 2D context, browser hosts only
+
+  function hexChannel(pair) {
+    return parseInt(pair.length === 1 ? pair + pair : pair, 16);
+  }
+
+  /** Parses a 3/4/6/8-digit `#`-prefixed hex string (already RE-validated) to {r,g,b,a}. */
+  function parseHexRgb(hex) {
+    var digits = hex.slice(1);
+    if (digits.length === 3 || digits.length === 4) {
+      return {
+        r: hexChannel(digits[0]),
+        g: hexChannel(digits[1]),
+        b: hexChannel(digits[2]),
+        a: digits.length === 4 ? hexChannel(digits[3]) / 255 : 1,
+      };
+    }
+    return {
+      r: hexChannel(digits.slice(0, 2)),
+      g: hexChannel(digits.slice(2, 4)),
+      b: hexChannel(digits.slice(4, 6)),
+      a: digits.length === 8 ? hexChannel(digits.slice(6, 8)) / 255 : 1,
+    };
+  }
+
   /**
-   * A background colour safe to render a white-on-colour chip with.
+   * Serializes opaque channels back to `rgb(r, g, b)` -- the form
+   * `getComputedStyle` reports, so an inspected chip reads the same as the
+   * value renderableColor handed out. Only ever called with an opaque
+   * colour, so no alpha component is emitted.
+   */
+  function rgbString(rgb) {
+    return "rgb(" + rgb.r + ", " + rgb.g + ", " + rgb.b + ")";
+  }
+
+  /**
+   * Paints `raw` into the 1x1 probe canvas over `sentinel` and reads the
+   * pixel back as `[r, g, b, a]` (all 0-255). The canvas silently ignores a
+   * value it cannot parse, leaving `sentinel` painted instead -- which is
+   * what the two-sentinel comparison in resolveRgbViaCanvas detects.
+   */
+  function probePixel(sentinel, raw) {
+    probeCanvasCtx.fillStyle = sentinel;
+    probeCanvasCtx.fillStyle = raw;
+    probeCanvasCtx.clearRect(0, 0, 1, 1);
+    probeCanvasCtx.fillRect(0, 0, 1, 1);
+    var data = probeCanvasCtx.getImageData(0, 0, 1, 1).data;
+    return [data[0], data[1], data[2], data[3]];
+  }
+
+  /**
+   * Resolves a non-hex colour to concrete RGB by asking a real browser: a
+   * lazily created, module-level 1x1 probe canvas is painted with the value
+   * and the pixel read back, reducing *whatever* the browser accepts to
+   * concrete channels. Reading `fillStyle` back as a string instead would
+   * only cover the forms a browser happens to serialise as `#rrggbb` or
+   * `rgba(...)`: Chrome echoes `oklch(0.7 0.1 200)`, `lab(...)` and
+   * `color(display-p3 ...)` back verbatim, and no string parser here can
+   * turn those into RGB -- so they would resolve to `null` and renderable-
+   * Color would grey out a colour that renders perfectly well. The pixel
+   * does not care what syntax produced it.
+   *
+   * `raw` is painted twice, once over each of two distinct sentinels: a
+   * value the canvas rejects leaves the sentinel painted instead, so the
+   * two pixels disagree (`var(--x)`, `light-dark(...)`, garbage), while an
+   * accepted one paints the same pixel both times. Comparing against a
+   * single sentinel would instead reject any `raw` that legitimately
+   * resolves to that sentinel's own colour.
+   *
+   * `null` with no `document` (the DOM-less test host) or on any failure --
+   * including a host that blocks canvas readback.
+   */
+  function resolveRgbViaCanvas(raw) {
+    if (typeof document === "undefined") return null;
+    try {
+      if (!probeCanvasCtx) {
+        var canvas = document.createElement("canvas");
+        if (canvas) {
+          canvas.width = 1;
+          canvas.height = 1;
+        }
+        probeCanvasCtx =
+          canvas && typeof canvas.getContext === "function"
+            ? canvas.getContext("2d", { willReadFrequently: true })
+            : null;
+      }
+      if (!probeCanvasCtx) return null;
+      var overA = probePixel("#010203", raw);
+      var overB = probePixel("#fdfeff", raw);
+      for (var i = 0; i < 4; i++) {
+        if (overA[i] !== overB[i]) return null; // rejected: each sentinel stayed painted
+      }
+      return { r: overA[0], g: overA[1], b: overA[2], a: overA[3] / 255 };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * Resolves `raw` to concrete `{ r, g, b, a }` channels (0-255, alpha
+   * 0-1), or `null` if it can't be resolved. Hex is parsed directly -- the
+   * only shape this plugin itself ever writes, so the DOM-less test host
+   * measures contrast with no stubbing -- and everything else goes through
+   * `resolveRgbViaCanvas`, memoised since chipStyle/denseChipStyle call
+   * this once per chip per render.
+   *
+   * `currentcolor` is refused outright rather than measured, because it is
+   * the one value a canvas answers *confidently and wrongly*: with no
+   * element to inherit from it paints black, while in the DOM
+   * `background: currentcolor` resolves to the chip's own text colour.
+   * Trusting the canvas there would measure black, keep white text, and
+   * render white on white -- the exact bug this contrast pass exists to
+   * close (see CURRENT_COLOR_RE).
+   */
+  function resolveRgb(raw) {
+    if (typeof raw !== "string") return null;
+    var trimmed = raw.trim();
+    if (CURRENT_COLOR_RE.test(trimmed)) return null;
+    if (HEX_RGBA_RE.test(trimmed)) return parseHexRgb(trimmed);
+    if (resolveRgbCache.has(trimmed)) return resolveRgbCache.get(trimmed);
+    var resolved = resolveRgbViaCanvas(trimmed);
+    resolveRgbCache.set(trimmed, resolved);
+    return resolved;
+  }
+
+  /** WCAG sRGB companding for one 0-255 channel. */
+  function srgbChannel(channel) {
+    var c = channel / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  }
+
+  /**
+   * WCAG relative luminance of an {r,g,b} object. Alpha is ignored, which is
+   * only sound on an opaque colour: a translucent background composites with
+   * whatever surface is behind the chip, and this plugin cannot read that
+   * surface (it is the host's, and theme-dependent). `renderableColor` is
+   * what upholds that -- it rejects anything not fully opaque -- so every
+   * background reaching here via chipStyle/denseChipStyle is opaque.
+   */
+  function relativeLuminance(rgb) {
+    return 0.2126 * srgbChannel(rgb.r) + 0.7152 * srgbChannel(rgb.g) + 0.0722 * srgbChannel(rgb.b);
+  }
+
+  /**
+   * WCAG contrast ratio between two colours (1 to 21). Either side failing
+   * to resolve (an unparseable value passed directly rather than through
+   * renderableColor) yields 1 -- the safest ("no contrast") answer rather
+   * than throwing.
+   */
+  function contrastRatio(a, b) {
+    var rgbA = resolveRgb(a);
+    var rgbB = resolveRgb(b);
+    if (!rgbA || !rgbB) return 1;
+    var lumA = relativeLuminance(rgbA);
+    var lumB = relativeLuminance(rgbB);
+    var lighter = Math.max(lumA, lumB);
+    var darker = Math.min(lumA, lumB);
+    return (lighter + 0.05) / (darker + 0.05);
+  }
+
+  /**
+   * The chip text colour to pair with `background`: white unless its
+   * contrast ratio against white falls below CHIP_TEXT_MIN_CONTRAST (3.0,
+   * WCAG AA for graphical objects), in which case the dark token. An
+   * unresolvable background gets white, matching the pre-contrast default.
+   *
+   * Expects an already-renderable background -- i.e. a `renderableColor`
+   * return value, which is opaque by construction. Measuring a translucent
+   * colour here would read the colour itself rather than the surface it
+   * composites into, and pair confident text with a chip that is barely
+   * there (see relativeLuminance).
+   */
+  function chipTextColor(background) {
+    if (!resolveRgb(background)) return CHIP_TEXT_LIGHT;
+    return contrastRatio(background, CHIP_TEXT_LIGHT) >= CHIP_TEXT_MIN_CONTRAST ? CHIP_TEXT_LIGHT : CHIP_TEXT_DARK;
+  }
+
+  /**
+   * A background colour safe to render a chip with -- resolvable to
+   * concrete, visible RGB, or DEFAULT_COLOR.
    *
    * `sanitizeCatalog` accepts any string as a tag's `color` (it only checks
    * the type), while `normalizeColor` guards the *write* path -- so a value
    * that never went through this plugin's UI can reach the DOM unvalidated.
-   * The browser then drops the whole declaration, leaving a transparent
-   * background behind chipStyle's hard-coded `color: "#fff"`: a chip whose
-   * name is invisible on the light theme.
+   * Two ways that goes wrong: the browser drops an unparseable declaration
+   * entirely, leaving a transparent background; or the declaration parses
+   * fine but resolves to a see-through one (`"transparent"`,
+   * `"rgba(0,0,0,0)"`, an 8-digit hex with a zero alpha byte). Either way
+   * the chip becomes invisible against whatever text colour pairs with it.
+   *
+   * Anything not fully opaque is refused, not just alpha zero. A chip
+   * background with `0 < alpha < 1` composites with the host surface behind
+   * it, so the colour named in the catalog is not the colour rendered --
+   * `chipTextColor` would measure the named one and pair confident text with
+   * a chip that is barely there (`"#00000019"` measures as pure black,
+   * scores 21 against white, keeps white text, and renders as roughly
+   * `#e6e6e6` under it on a light card). Compositing it out here is not
+   * possible: the surface belongs to the host and changes with its theme.
+   * `normalizeColor` only ever writes opaque 3/6-digit hex, so nothing this
+   * plugin produces is affected -- only values arriving by the other routes
+   * above, for which falling back to a legible gray is already the answer.
+   *
+   * `currentcolor` is refused by name and needs no parser at all: it is
+   * unreadable by construction, not merely unmeasurable (see
+   * CURRENT_COLOR_RE).
    *
    * Hex passes immediately (the only shape this plugin writes). Anything
-   * else is asked of the browser's own parser rather than rejected, because
-   * a named or functional colour -- `"red"`, `"rgb(1 2 3)"` -- is a
-   * legitimate value an older catalog or an import may hold, and those
-   * render correctly today. Where there is no parser (the DOM-less test
-   * host) the value passes through, matching the previous behaviour instead
-   * of silently recolouring tags in a context that renders nothing anyway.
+   * else is asked of the browser's own parser: a named or functional
+   * colour -- `"red"`, `"rgb(1 2 3)"`, `"oklch(0.7 0.1 200)"` -- is a
+   * legitimate value an older catalog or an import may hold. But surviving
+   * `CSS.supports` is not enough on its own -- a value the browser
+   * *accepts* can still resolve to fully transparent, or (given a parser)
+   * to nothing `resolveRgb` can turn into concrete RGB at all
+   * (`var(--x)`, whose declaration the DOM drops too) -- either of which
+   * now falls back to DEFAULT_COLOR too. Where there is no parser (the
+   * DOM-less test host) the value passes through unchecked, matching the
+   * previous behaviour instead of silently recolouring tags in a context
+   * that renders nothing anyway.
+   *
+   * A value that *did* resolve is handed back as the measured
+   * `rgb(r, g, b)` rather than as the string the catalog held, so the
+   * colour the chip renders is by construction the colour chipTextColor
+   * measured. The probe canvas is detached: it has no element to inherit
+   * from and no `color-scheme`, so a context-dependent value resolves there
+   * against a context the chip does not share. A CSS system colour is the
+   * live case -- Chrome accepts 42 of them and resolves 33 differently
+   * under `color-scheme: dark`, which the canvas never reports. Measured on
+   * a dark host theme with the authored value passed through, `Canvas`
+   * rendered `rgb(18,18,18)` carrying the `#111827` text picked for the
+   * light-scheme white the canvas had reported: contrast 1.06, worse than
+   * the hard-coded white this replaced (18.73). Normalising closes that for
+   * every context-dependent value at once, with no keyword list to keep in
+   * step with browsers.
+   *
+   * The cost is gamut: a wide-gamut value (`color(display-p3 ...)`, an
+   * out-of-sRGB `oklch(...)`) comes back sRGB-clamped, because the probe
+   * reads sRGB bytes. That clamp was already in the contrast decision --
+   * only the rendered colour is newly bound to it, so measurement and paint
+   * now agree on a wide-gamut display instead of quietly diverging.
    */
   function renderableColor(raw) {
     if (typeof raw !== "string") return DEFAULT_COLOR;
     var trimmed = raw.trim();
     if (trimmed === "") return DEFAULT_COLOR;
+    if (CURRENT_COLOR_RE.test(trimmed)) return DEFAULT_COLOR;
     if (HEX_COLOR_RE.test(trimmed)) return trimmed;
+    // A hex carrying an alpha channel is measurable with no parser and no
+    // document at all, so it is settled here rather than inside the
+    // CSS.supports branch -- which a host without a `CSS` object skips
+    // entirely, and which would otherwise let `#ffffff00` through untouched.
+    if (HEX_RGBA_RE.test(trimmed)) return parseHexRgb(trimmed).a < 1 ? DEFAULT_COLOR : trimmed;
     if (typeof CSS !== "undefined" && CSS && typeof CSS.supports === "function") {
-      return CSS.supports("color", trimmed) ? trimmed : DEFAULT_COLOR;
+      if (!CSS.supports("color", trimmed)) return DEFAULT_COLOR;
+      var rgb = resolveRgb(trimmed);
+      // A resolved-but-see-through value is unrenderable either way.
+      if (rgb !== null && rgb.a < 1) return DEFAULT_COLOR;
+      // A `null` resolution is only conclusive when there was a real DOM to
+      // resolve against -- with no `document` (the DOM-less test host),
+      // resolveRgb has no browser to ask about an ordinary named colour, so
+      // this stays permissive and matches the pre-contrast behaviour
+      // instead of blanket-rejecting every non-hex value the moment a CSS
+      // stub is injected.
+      if (rgb === null && typeof document !== "undefined") return DEFAULT_COLOR;
+      // Hand back what the probe actually measured, not what the catalog
+      // said, so the rendered colour and the measured one cannot disagree.
+      return rgb === null ? trimmed : rgbString(rgb);
     }
     return trimmed;
   }
 
   function chipStyle(color) {
+    var background = renderableColor(color);
     return {
       display: "inline-flex",
       alignItems: "center",
       gap: "4px",
       padding: "1px 7px",
       borderRadius: "999px",
-      background: renderableColor(color),
-      color: "#fff",
+      background: background,
+      color: chipTextColor(background),
       fontSize: "11px",
       fontWeight: 500,
       whiteSpace: "nowrap",
@@ -202,13 +474,14 @@
   }
 
   function denseChipStyle(color) {
+    var background = renderableColor(color);
     return {
       display: "inline-flex",
       alignItems: "center",
       padding: "0px 5px",
       borderRadius: "999px",
-      background: renderableColor(color),
-      color: "#fff",
+      background: background,
+      color: chipTextColor(background),
       fontSize: "10px",
       fontWeight: 500,
       whiteSpace: "nowrap",
@@ -2010,6 +2283,9 @@
       renderableColor: renderableColor,
       chipStyle: chipStyle,
       denseChipStyle: denseChipStyle,
+      resolveRgb: resolveRgb,
+      contrastRatio: contrastRatio,
+      chipTextColor: chipTextColor,
       MAX_TAG_LENGTH: MAX_TAG_LENGTH,
       MAX_TAGS_PER_TASK: MAX_TAGS_PER_TASK,
       TOPBAR_WIDTH: TOPBAR_WIDTH,

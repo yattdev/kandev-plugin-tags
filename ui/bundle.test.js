@@ -61,6 +61,95 @@ function makeFakeConsole() {
   return { console: { error: (...args) => calls.error.push(args) }, calls };
 }
 
+/**
+ * A fake `document` whose `canvas.getContext("2d")` mimics the behaviour
+ * resolveRgb's canvas branch depends on, as measured against a real
+ * headless Chromium (see the QA notes on this task):
+ *
+ *   - an accepted value is *painted*, and `getImageData` reads it back as
+ *     non-premultiplied `[r, g, b, a]` bytes -- which is how resolveRgb
+ *     reduces a colour whose `fillStyle` serialization it could never
+ *     parse (`oklch(...)`, `lab(...)`, `color(display-p3 ...)`) to RGB;
+ *   - a value the canvas cannot parse is silently ignored, leaving the
+ *     previously assigned colour painted -- which is what the two-sentinel
+ *     comparison detects;
+ *   - `currentcolor` is *accepted* and paints black, because a canvas has
+ *     no element to inherit from. A real Chrome does exactly this, which is
+ *     why resolveRgb has to refuse that keyword by name rather than trust
+ *     the measurement.
+ */
+function makeFakeColorDocument() {
+  /** Resolves to `[r, g, b, a]` bytes, or null when the canvas would ignore the value. */
+  function resolve(value) {
+    const v = String(value).trim().toLowerCase();
+    const hex = /^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/.exec(v);
+    if (hex) {
+      const d = hex[1];
+      const wide = d.length > 4;
+      const at = (i) => {
+        const pair = wide ? d.slice(i * 2, i * 2 + 2) : d[i] + d[i];
+        return parseInt(pair, 16);
+      };
+      const hasAlpha = d.length === 4 || d.length === 8;
+      return [at(0), at(1), at(2), hasAlpha ? at(3) : 255];
+    }
+    if (v === "transparent") return [0, 0, 0, 0];
+    if (v === "currentcolor") return [0, 0, 0, 255]; // no element context: real Chrome paints black
+    const rgba = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(v);
+    if (rgba) {
+      const a = rgba[4] !== undefined ? parseFloat(rgba[4]) : 1;
+      return [Number(rgba[1]), Number(rgba[2]), Number(rgba[3]), Math.round(a * 255)];
+    }
+    const hsla = /^hsla?\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(v);
+    if (hsla) {
+      const l = parseFloat(hsla[3]);
+      const a = hsla[4] !== undefined ? parseFloat(hsla[4]) : 1;
+      // These tests only exercise l === 0 (pure black) -- full HSL->RGB
+      // conversion isn't needed for that case.
+      if (l === 0) return [0, 0, 0, Math.round(a * 255)];
+    }
+    // CSS system colours, measured in Chromium: a detached canvas has no
+    // `color-scheme`, so it resolves every one of them in the light scheme
+    // and reports that as confidently as any other colour. The chip resolves
+    // the same keyword against its own inherited scheme -- which is why
+    // renderableColor hands back what it measured instead of the keyword.
+    if (v === "canvas" || v === "field") return [255, 255, 255, 255];
+    if (v === "canvastext") return [0, 0, 0, 255];
+    // Nested `currentcolor`, measured in Chromium: a canvas *accepts* the
+    // keyword inside a colour function and resolves it against its own
+    // (elementless) context -- black -- so these come back as confident,
+    // opaque colours rather than as rejections, exactly like the bare
+    // keyword above. Only refusing the keyword by name catches them.
+    if (v === "color-mix(in srgb, currentcolor 50%, white)") return [128, 128, 128, 255];
+    if (v === "color-mix(in srgb, currentcolor, #ffffff)") return [128, 128, 128, 255];
+    if (v === "rgb(from currentcolor r g b)") return [0, 0, 0, 255];
+    // A modern colour function: a real canvas accepts and paints it, but
+    // echoes the source syntax back from `fillStyle`, so only the pixel
+    // carries the answer.
+    if (v === "oklch(0.7 0.1 200)") return [64, 177, 183, 255];
+    return null; // rejected, matching a real canvas ignoring an invalid value
+  }
+  let painted = [0, 0, 0, 255];
+  let pending = [0, 0, 0, 255];
+  return {
+    createElement: () => ({
+      width: 0,
+      height: 0,
+      getContext: () => ({
+        set fillStyle(v) {
+          const resolved = resolve(v);
+          if (resolved !== null) pending = resolved;
+        },
+        clearRect() {},
+        fillRect() {
+          painted = pending;
+        },
+        getImageData: () => ({ data: painted }),
+      }),
+    }),
+  };
+}
+
 // -----------------------------------------------------------------------
 // normalizeName / normalizeColor
 // -----------------------------------------------------------------------
@@ -145,9 +234,317 @@ test("chip styles never emit an unrenderable background", () => {
   assert.equal(chipStyle("not-a-colour").background, DEFAULT_COLOR);
   assert.equal(denseChipStyle("not-a-colour").background, DEFAULT_COLOR);
   // The paired text colour is what makes a bad background unreadable.
-  assert.equal(chipStyle("not-a-colour").color, "#fff");
+  // DEFAULT_COLOR is gray-500, which reads fine in light text.
+  assert.equal(chipStyle("not-a-colour").color, "#ffffff");
   // Hex still passes through untouched with a parser that rejects everything.
   assert.equal(chipStyle("#ef4444").background, "#ef4444");
+});
+
+// -----------------------------------------------------------------------
+// resolveRgb / contrastRatio / chipTextColor
+// -----------------------------------------------------------------------
+
+test("resolveRgb parses hex without needing a document", () => {
+  const { resolveRgb } = loadBundle().__internal;
+  assertStructural.deepEqual(resolveRgb("#f00"), { r: 255, g: 0, b: 0, a: 1 });
+  assertStructural.deepEqual(resolveRgb("#ff0000"), { r: 255, g: 0, b: 0, a: 1 });
+  assertStructural.deepEqual(resolveRgb("#ff000080"), { r: 255, g: 0, b: 0, a: 128 / 255 });
+  assertStructural.deepEqual(resolveRgb("#f008"), { r: 255, g: 0, b: 0, a: 136 / 255 });
+});
+
+test("resolveRgb returns null for a non-hex value with no document present", () => {
+  const { resolveRgb } = loadBundle().__internal;
+  assert.equal(resolveRgb("red"), null);
+  assert.equal(resolveRgb("transparent"), null);
+  assert.equal(resolveRgb("currentcolor"), null);
+  assert.equal(resolveRgb(null), null);
+});
+
+test("resolveRgb resolves non-hex colours via a probe canvas when a document is present", () => {
+  const document = makeFakeColorDocument();
+  const { resolveRgb } = loadBundle(null, { document }).__internal;
+  assertStructural.deepEqual(resolveRgb("transparent"), { r: 0, g: 0, b: 0, a: 0 });
+  // A modern colour function: a real canvas paints it but echoes the source
+  // syntax back from `fillStyle`, so only reading the painted *pixel*
+  // resolves it. Greying these out would lose a colour that renders fine.
+  assertStructural.deepEqual(resolveRgb("oklch(0.7 0.1 200)"), { r: 64, g: 177, b: 183, a: 1 });
+});
+
+// Regression (found in QA against a real headless Chromium): a canvas has no
+// element to inherit from, so it *accepts* `currentcolor` and paints it
+// black -- it does not reject it. Measuring that black would keep white chip
+// text while the DOM resolves `background: currentcolor` to the chip's own
+// white label: white on white, the reported bug still open. resolveRgb must
+// refuse the keyword by name rather than trust the canvas, in every casing,
+// and renderableColor must fall back with no parser and no document at all.
+test("resolveRgb refuses currentcolor even when the canvas resolves it to a colour", () => {
+  const document = makeFakeColorDocument();
+  const withDom = loadBundle(null, { CSS: { supports: () => true }, document }).__internal;
+  // The fake canvas models the real one: currentcolor paints black.
+  assertStructural.deepEqual(withDom.resolveRgb("#000000"), { r: 0, g: 0, b: 0, a: 1 });
+  for (const spelling of ["currentcolor", "currentColor", "CURRENTCOLOR", "  currentcolor  "]) {
+    assert.equal(withDom.resolveRgb(spelling), null, spelling);
+    assert.equal(withDom.renderableColor(spelling), withDom.DEFAULT_COLOR, spelling);
+  }
+  assert.equal(withDom.chipStyle("currentcolor").background, withDom.DEFAULT_COLOR);
+  assert.equal(withDom.chipStyle("currentcolor").color, "#ffffff");
+  assert.equal(withDom.denseChipStyle("currentcolor").background, withDom.DEFAULT_COLOR);
+
+  // Unreadable by construction, not merely unmeasurable: no CSS, no document.
+  const bare = loadBundle().__internal;
+  assert.equal(bare.renderableColor("currentcolor"), bare.DEFAULT_COLOR);
+});
+
+// Regression (measured in Chromium): the keyword guard was anchored to the
+// whole value, so `currentcolor` nested inside a colour function slipped
+// past it. The canvas resolves the nesting confidently -- against its own
+// elementless context, i.e. black -- so nothing downstream had reason to
+// doubt it, while the DOM resolves it against the chip's own `color`, which
+// chipStyle sets. Measured before this guard, on both the light and the dark
+// host theme: `color-mix(in srgb, currentcolor 50%, white)` rendered
+// `background: color(srgb 1 1 1)` under `color: #ffffff`, and
+// `rgb(from currentcolor r g b)` did the same -- white text on a white chip,
+// contrast 1.00. That is the reported bug, reached by nesting.
+test("renderableColor refuses currentcolor nested inside a colour function", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { renderableColor, resolveRgb, chipStyle, denseChipStyle, DEFAULT_COLOR } = loadBundle(null, {
+    CSS,
+    document,
+  }).__internal;
+  for (const nested of [
+    "color-mix(in srgb, currentcolor 50%, white)",
+    "color-mix(in srgb, currentColor, #ffffff)",
+    "rgb(from currentcolor r g b)",
+  ]) {
+    // The fake models the measured canvas: these resolve, they are not rejected.
+    assert.equal(resolveRgb(nested), null, nested);
+    assert.equal(renderableColor(nested), DEFAULT_COLOR, nested);
+    assert.equal(chipStyle(nested).background, DEFAULT_COLOR, nested);
+    assert.equal(denseChipStyle(nested).background, DEFAULT_COLOR, nested);
+  }
+  // Token-bounded, so a colour that merely renders fine is not swept up.
+  assert.notEqual(renderableColor("oklch(0.7 0.1 200)"), DEFAULT_COLOR);
+  assert.equal(renderableColor("rgb(1, 2, 3)"), "rgb(1, 2, 3)");
+});
+
+// Regression: resolveRgbViaCanvas detects a rejected `fillStyle` assignment
+// by the value not moving. Probing with a single sentinel makes any colour
+// that legitimately normalizes to that sentinel indistinguishable from a
+// rejection, so a renderable tag colour would silently become DEFAULT_COLOR.
+// Both sentinels are opaque hex, which is what an opaque rgb() normalizes to.
+test("resolveRgb resolves a colour that normalizes onto one of its own probe sentinels", () => {
+  const document = makeFakeColorDocument();
+  const { resolveRgb, renderableColor } = loadBundle(null, { CSS: { supports: () => true }, document }).__internal;
+  assertStructural.deepEqual(resolveRgb("rgb(253, 254, 255)"), { r: 253, g: 254, b: 255, a: 1 });
+  assertStructural.deepEqual(resolveRgb("rgb(1, 2, 3)"), { r: 1, g: 2, b: 3, a: 1 });
+  assert.equal(renderableColor("rgb(253, 254, 255)"), "rgb(253, 254, 255)");
+  assert.equal(renderableColor("rgb(1, 2, 3)"), "rgb(1, 2, 3)");
+});
+
+test("contrastRatio of white vs black is 21, and a colour against itself is 1", () => {
+  const { contrastRatio } = loadBundle().__internal;
+  assert.ok(Math.abs(contrastRatio("#ffffff", "#000000") - 21) < 0.01);
+  assert.ok(Math.abs(contrastRatio("#000000", "#ffffff") - 21) < 0.01);
+  assert.equal(contrastRatio("#3b82f6", "#3b82f6"), 1);
+  assert.equal(contrastRatio("#6b7280", "#6b7280"), 1);
+});
+
+test("chipTextColor picks dark text for pale/low-contrast backgrounds, white otherwise", () => {
+  const { chipTextColor } = loadBundle().__internal;
+  // Yellow, green, orange: unreadable in white today (report's D2 table).
+  assert.equal(chipTextColor("#eab308"), "#111827");
+  assert.equal(chipTextColor("#22c55e"), "#111827");
+  assert.equal(chipTextColor("#f97316"), "#111827");
+  // The pale colour named in the report.
+  assert.equal(chipTextColor("#ffffe0"), "#111827");
+  // The remaining palette entries plus DEFAULT_COLOR stay white.
+  assert.equal(chipTextColor("#ef4444"), "#ffffff");
+  assert.equal(chipTextColor("#3b82f6"), "#ffffff");
+  assert.equal(chipTextColor("#a855f7"), "#ffffff");
+  assert.equal(chipTextColor("#ec4899"), "#ffffff");
+  assert.equal(chipTextColor("#6b7280"), "#ffffff");
+});
+
+test("every PALETTE colour plus DEFAULT_COLOR clears the contrast floor on both chip surfaces", () => {
+  const { chipStyle, denseChipStyle, contrastRatio, PALETTE, DEFAULT_COLOR } = loadBundle().__internal;
+  const colours = PALETTE.concat([DEFAULT_COLOR]);
+  for (const c of colours) {
+    const chip = chipStyle(c);
+    const dense = denseChipStyle(c);
+    assert.ok(
+      contrastRatio(chip.background, chip.color) >= 3,
+      `chipStyle(${c}) contrast ${contrastRatio(chip.background, chip.color)} below 3.0`,
+    );
+    assert.ok(
+      contrastRatio(dense.background, dense.color) >= 3,
+      `denseChipStyle(${c}) contrast ${contrastRatio(dense.background, dense.color)} below 3.0`,
+    );
+  }
+});
+
+// Regression: a fully-transparent background -- reachable via "transparent",
+// "rgba(0,0,0,0)", an 8-digit hex with a zero alpha byte, or "hsla(...,0)" --
+// paired white text renders an invisible chip name. renderableColor must
+// treat alpha-zero as unrenderable, same as an unparseable value.
+test("renderableColor falls back to DEFAULT_COLOR for a fully-transparent colour", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { renderableColor, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
+  assert.equal(renderableColor("rgba(0,0,0,0)"), DEFAULT_COLOR);
+  // #ffffff00 resolves via the hex fast path and needs no document at all.
+  assert.equal(renderableColor("#ffffff00"), DEFAULT_COLOR);
+  assert.equal(renderableColor("hsla(0,0%,0%,0)"), DEFAULT_COLOR);
+});
+
+// Regression: alpha zero is only the degenerate case. A chip background with
+// 0 < alpha < 1 composites with the host surface behind it, so the colour in
+// the catalog is not the colour rendered -- chipTextColor would measure the
+// named one and pair confident text with a chip that is barely there.
+// #00000019 measures as pure black, scores 21 against white, and so kept
+// white text over what renders as roughly #e6e6e6 on a light card: contrast
+// ~1.2, the reported bug reached by degree instead of by kind. The host
+// surface is not readable from here (it is theme-dependent), so anything not
+// fully opaque falls back rather than being composited.
+test("renderableColor falls back to DEFAULT_COLOR for a partially transparent colour", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { renderableColor, chipStyle, denseChipStyle, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
+  for (const translucent of ["#00000019", "#0000001a", "#ffffff40", "#11223344", "#f008", "rgba(0,0,0,0.05)"]) {
+    assert.equal(renderableColor(translucent), DEFAULT_COLOR, translucent);
+    assert.equal(chipStyle(translucent).background, DEFAULT_COLOR, translucent);
+    assert.equal(denseChipStyle(translucent).background, DEFAULT_COLOR, translucent);
+  }
+  // Fully opaque stays untouched, including the alpha-carrying hex spellings.
+  assert.equal(renderableColor("#ffffffff"), "#ffffffff");
+  assert.equal(renderableColor("#f00f"), "#f00f");
+  assert.equal(renderableColor("rgb(1, 2, 3)"), "rgb(1, 2, 3)");
+});
+
+// Where the opacity cutoff actually lands. Alpha is quantised to a byte
+// everywhere it is measured -- both the hex path here and `getImageData` in a
+// browser -- so `0xfe` is the last value distinguishable from opaque and
+// `0xff` is opaque. Confirmed against a real headless Chromium, where
+// `rgba(0,0,0,0.998)` reads back alpha 0.996 (rejected) and
+// `rgba(0,0,0,0.999)` reads back exactly 1 (passes). Locked here because the
+// DOM-less harness is the only place CI can assert it.
+test("the opacity cutoff sits on the alpha byte, not on a fractional threshold", () => {
+  const { renderableColor, DEFAULT_COLOR } = loadBundle().__internal;
+  assert.equal(renderableColor("#000000ff"), "#000000ff");
+  assert.equal(renderableColor("#000000fe"), DEFAULT_COLOR);
+  assert.equal(renderableColor("#00000001"), DEFAULT_COLOR);
+  assert.equal(renderableColor("#00000000"), DEFAULT_COLOR);
+});
+
+// An alpha-carrying hex needs no parser and no document to measure, so it
+// must not depend on the CSS.supports branch -- a host with no `CSS` object
+// skips that branch entirely and previously let #ffffff00 through untouched.
+test("renderableColor rejects a see-through hex with no CSS and no document", () => {
+  const { renderableColor, DEFAULT_COLOR } = loadBundle().__internal;
+  assert.equal(renderableColor("#ffffff00"), DEFAULT_COLOR);
+  assert.equal(renderableColor("#00000019"), DEFAULT_COLOR);
+  assert.equal(renderableColor("#f008"), DEFAULT_COLOR);
+  assert.equal(renderableColor("#ffffffff"), "#ffffffff");
+});
+
+// The invariant relativeLuminance depends on: it ignores alpha, which is only
+// sound because renderableColor has already refused everything translucent.
+test("every background chipStyle emits is fully opaque", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { chipStyle, denseChipStyle, resolveRgb, PALETTE, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
+  const inputs = PALETTE.concat([
+    DEFAULT_COLOR,
+    "#00000019",
+    "#ffffff00",
+    "transparent",
+    "currentcolor",
+    "rgba(0,0,0,0.5)",
+    "not-a-colour",
+    "",
+  ]);
+  for (const input of inputs) {
+    for (const style of [chipStyle(input), denseChipStyle(input)]) {
+      const rgb = resolveRgb(style.background);
+      assert.ok(rgb, `chip background for ${JSON.stringify(input)} did not resolve`);
+      assert.equal(rgb.a, 1, `chip background for ${JSON.stringify(input)} is not opaque`);
+    }
+  }
+});
+
+// Regression (found in QA against a real headless Chromium): a colour the
+// browser renders perfectly well must not be greyed out just because its
+// `fillStyle` serialization is unparseable. Chrome echoes `oklch(...)`,
+// `lab(...)` and `color(display-p3 ...)` back verbatim, so resolveRgb reads
+// the painted pixel instead -- and renderableColor keeps the colour, with a
+// contrast-derived text colour, rather than falling back.
+//
+// It keeps the *colour*, not the authored string: the value comes back as the
+// measured `rgb(...)`, so what the chip paints is what chipTextColor measured
+// (see the system-colour regression below). rgb(64, 177, 183) is the same
+// colour oklch(0.7 0.1 200) renders as on an sRGB display.
+test("renderableColor keeps a modern colour function rather than greying it out", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { renderableColor, chipStyle, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
+  assert.notEqual(renderableColor("oklch(0.7 0.1 200)"), DEFAULT_COLOR);
+  assert.equal(renderableColor("oklch(0.7 0.1 200)"), "rgb(64, 177, 183)");
+  assert.equal(chipStyle("oklch(0.7 0.1 200)").background, "rgb(64, 177, 183)");
+  // rgb(64, 177, 183) scores 2.28 against white, so it takes the dark token.
+  assert.equal(chipStyle("oklch(0.7 0.1 200)").color, "#111827");
+});
+
+// Regression (measured in Chromium): the probe canvas is detached, so it has
+// no `color-scheme` and resolves every CSS system colour in the light scheme.
+// The chip resolves the same keyword against its own inherited scheme, so
+// with the authored value passed through, the contrast pass measured one
+// colour and the browser painted another. Measured under `color-scheme: dark`
+// with pass-through, versus the hard-coded white this branch replaced:
+//
+//   Canvas      18.73 -> 1.06   (#111827 text on rgb(18,18,18))
+//   Field       11.20 -> 1.58
+//   CanvasText   1.00 -> 1.00   (already broken)
+//
+// Handing back the measured rgb() binds the painted colour to the measured
+// one, so the chip is legible on both themes -- and it needs no list of
+// system-colour keywords, which differ per browser.
+test("renderableColor normalizes a context-dependent colour to what it measured", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { renderableColor, chipStyle, contrastRatio } = loadBundle(null, { CSS, document }).__internal;
+  // The fake models the measured canvas: system colours resolve light-scheme.
+  assert.equal(renderableColor("Canvas"), "rgb(255, 255, 255)");
+  assert.equal(renderableColor("CanvasText"), "rgb(0, 0, 0)");
+  for (const systemColour of ["Canvas", "CanvasText", "Field"]) {
+    const chip = chipStyle(systemColour);
+    // No longer a keyword, so it cannot re-resolve against the chip's theme.
+    assert.ok(/^rgb\(\d+, \d+, \d+\)$/.test(chip.background), `${systemColour} -> ${chip.background}`);
+    assert.ok(
+      contrastRatio(chip.background, chip.color) >= 3,
+      `${systemColour} contrast ${contrastRatio(chip.background, chip.color)} below 3.0`,
+    );
+  }
+  // Normalising is idempotent on a colour already in that form.
+  assert.equal(renderableColor("rgb(1, 2, 3)"), "rgb(1, 2, 3)");
+});
+
+// The regression case from the report: a transparent chip renders invisible
+// on the light theme. Both chip surfaces must fall back to a legible gray
+// chip, and DEFAULT_COLOR reads fine in white text.
+test("chip styles fall back to a legible chip for a transparent background (AC1)", () => {
+  const CSS = { supports: () => true };
+  const document = makeFakeColorDocument();
+  const { chipStyle, denseChipStyle, DEFAULT_COLOR } = loadBundle(null, { CSS, document }).__internal;
+  assert.equal(chipStyle("transparent").background, DEFAULT_COLOR);
+  assert.equal(chipStyle("transparent").color, "#ffffff");
+  assert.equal(denseChipStyle("transparent").background, DEFAULT_COLOR);
+  assert.equal(denseChipStyle("transparent").color, "#ffffff");
+});
+
+test("chipStyle is unchanged for a colour that already reads fine (AC8)", () => {
+  const { chipStyle } = loadBundle().__internal;
+  assert.equal(chipStyle("#ef4444").background, "#ef4444");
+  assert.equal(chipStyle("#ef4444").color, "#ffffff");
 });
 
 // -----------------------------------------------------------------------
