@@ -7,6 +7,16 @@
 Add one or more colored tags to any kanban card. Tags are yours alone: each
 user's tags and tag catalog are private and never shown to teammates.
 
+## Agent status tags
+
+Agents working on a kanban task can also apply the shared status tags
+`blocked`, `needs-input`, `needs-review`, `failed`, `obsolete`, and
+`abandoned` with the `add_tag`, `remove_tag`, and `list_tags` MCP tools.
+Unlike your personal tags, these status tags are visible to everyone in the
+workspace. They render as dashed chips before personal chips and refresh on
+focus or within 30 seconds. An agent can include a short note (up to 200
+characters); card chips can be removed directly with their × control.
+
 - **On every card**: tags you've added render as a row of small colored
   chips below the card's other badges. No tags, no row -- the row only
   appears once you've added at least one.

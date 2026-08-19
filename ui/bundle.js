@@ -754,6 +754,11 @@
   var catalogStores = {}; // workspaceId -> store
   var taskTagStores = {}; // taskId -> store
   var taskTagWideUnsubscribe = null;
+  // Workspace-shared status tags written by an agent through the backend.
+  // They deliberately remain separate from each user's private catalog.
+  var agentTagStores = {};
+  var agentTagRefreshTimer = null;
+  var agentTagActionUnavailableLogged = false;
 
   function makeStore() {
     return {
@@ -867,6 +872,48 @@
       store = taskTagStores[taskId] = makeStore();
     }
     return store;
+  }
+
+  function getAgentTagStore(workspaceId) {
+    var store = agentTagStores[workspaceId];
+    if (!store) {
+      store = agentTagStores[workspaceId] = makeStore();
+      store.value = {};
+    }
+    return store;
+  }
+
+  function sanitizeAgentTags(raw) {
+    return raw && raw.tasks && typeof raw.tasks === "object" ? raw.tasks : {};
+  }
+
+  function fetchAgentTags(host, workspaceId) {
+    var store = getAgentTagStore(workspaceId);
+    if (!host.api || typeof host.api.invokeAction !== "function") {
+      store.value = {}; store.loaded = true; store.error = null; notifyStoreListeners(store);
+      return Promise.resolve();
+    }
+    return fetchStore(store, function () {
+      return host.api.invokeAction("agent-tags", { workspaceId: workspaceId }).catch(function (err) {
+        if (!agentTagActionUnavailableLogged) { agentTagActionUnavailableLogged = true; logError("load agent tags", err); }
+        return { tasks: {} };
+      });
+    }, sanitizeAgentTags, "agent tags", function () { fetchAgentTags(host, workspaceId); });
+  }
+
+  function ensureAgentTagRefresh(host) {
+    if (agentTagRefreshTimer) return;
+    if (!window || typeof window.setInterval !== "function" || typeof window.addEventListener !== "function") return;
+    agentTagRefreshTimer = window.setInterval(function () {
+      Object.keys(agentTagStores).forEach(function (workspaceId) { fetchAgentTags(host, workspaceId); });
+    }, 30000);
+    function onFocus() { Object.keys(agentTagStores).forEach(function (workspaceId) { fetchAgentTags(host, workspaceId); }); }
+    window.addEventListener("focus", onFocus);
+    addDisposable(function () { if (typeof window.clearInterval === "function") window.clearInterval(agentTagRefreshTimer); agentTagRefreshTimer = null; window.removeEventListener("focus", onFocus); });
+  }
+
+  function useAgentTags(host, workspaceId) {
+    return useSharedStore(host, workspaceId || null, getAgentTagStore, function (currentHost) { ensureAgentTagRefresh(currentHost); }, fetchAgentTags);
   }
 
   /** Creates the ONE wide (cross-task) task-tags subscribe, idempotently. */
@@ -999,6 +1046,9 @@
     catalogStores = {};
     clearTaskTagCache();
     taskTagWideUnsubscribe = null;
+    agentTagStores = {};
+    agentTagRefreshTimer = null;
+    agentTagActionUnavailableLogged = false;
   }
 
   // ---------------------------------------------------------------------
@@ -1066,7 +1116,10 @@
           key: tag.id,
           "data-testid": "kandev-tags-chip",
           className: "kandev-tags-chip",
-          style: dense ? denseChipStyle(tag.color) : chipStyle(tag.color),
+          style: tag.agent ? Object.assign({}, dense ? denseChipStyle(tag.color) : chipStyle(tag.color), { border: "1px dashed currentColor" }) : (dense ? denseChipStyle(tag.color) : chipStyle(tag.color)),
+          "data-agent": tag.agent ? "true" : undefined,
+          title: tag.agent ? tag.name + " — applied by agent" + (tag.note ? ": " + tag.note : "") : undefined,
+          "aria-label": tag.agent ? tag.name + " — applied by agent" + (tag.note ? ": " + tag.note : "") : undefined,
         },
         tag.name,
       ];
@@ -1084,7 +1137,7 @@
               // here also navigates into the task.
               onClick: function (e) {
                 if (e && e.stopPropagation) e.stopPropagation();
-                handleRemove(tag.id);
+                handleRemove(tag);
               },
               onPointerDown: function (e) {
                 if (e && e.stopPropagation) e.stopPropagation();
@@ -1111,12 +1164,21 @@
       var catalogAndLoaded = useCatalog(host, resolvedWorkspaceId, CHIPS_WRITER_ID);
       var catalog = catalogAndLoaded[0];
       var catalogLoaded = catalogAndLoaded[1];
+      var agentTagsAndLoaded = useAgentTags(host, resolvedWorkspaceId);
+      var agentTags = agentTagsAndLoaded[0];
+      var agentTagsLoaded = agentTagsAndLoaded[1];
+      var refreshAgentTags = agentTagsAndLoaded[2];
 
-      if (!resolvedWorkspaceId || !tagIdsLoaded || !catalogLoaded || tagIds.length === 0) return null;
+      if (!resolvedWorkspaceId || !tagIdsLoaded || !catalogLoaded || !agentTagsLoaded) return null;
 
-      function handleRemove(id) {
+      function handleRemove(tag) {
+        if (tag.agent) {
+          if (!host.api || typeof host.api.invokeAction !== "function") return;
+          host.api.invokeAction("agent-tag-remove", { taskId: taskId, body: { tag: tag.id } }).then(refreshAgentTags).catch(function (err) { logError("remove agent tag from card", err); });
+          return;
+        }
         readModifyWriteTaskTags(host, taskId, CHIPS_WRITER_ID, function (current) {
-          return removeTaskTagId(current, id);
+          return removeTaskTagId(current, tag.id);
         }).catch(function (err) {
           // Surface the failed removal on the next subscribe/refresh cycle
           // rather than throwing inside a React event handler.
@@ -1134,6 +1196,8 @@
         .filter(function (tag) {
           return tag !== null;
         });
+      var sharedAgentTags = (agentTags[taskId] || []).map(function (tag) { return { id: tag.tag, name: tag.label, color: tag.color, note: tag.note, agent: true }; });
+      resolvedTags = sharedAgentTags.concat(resolvedTags);
       if (resolvedTags.length === 0) return null;
 
       var visibleTags = dense ? resolvedTags.slice(0, TASK_ROW_CHIP_LIMIT) : resolvedTags;

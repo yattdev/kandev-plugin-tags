@@ -1,14 +1,20 @@
 package main
 
-import "github.com/kandev/kandev/pkg/pluginsdk"
+import (
+	"sync"
 
-// tagsPlugin is a deliberate no-op backend: it embeds UnimplementedPlugin and
-// overrides nothing. Tags are per-user data read and written entirely by the
-// frontend against host.storage (scope "task"), so this plugin declares no
-// events, no webhooks, and no config -- the backend process exists solely to
-// satisfy manifest.yaml's runtime.type: binary requirement.
+	"github.com/kandev/kandev/pkg/pluginsdk"
+)
+
+// tagsPlugin serves the workspace-shared agent status-tag layer. User-created
+// tags remain private and are still handled by the browser through host.storage.
 type tagsPlugin struct {
 	pluginsdk.UnimplementedPlugin
+	stateMu sync.Mutex
 }
 
-var _ pluginsdk.Plugin = (*tagsPlugin)(nil)
+var (
+	_ pluginsdk.Plugin          = (*tagsPlugin)(nil)
+	_ pluginsdk.AgentToolPlugin = (*tagsPlugin)(nil)
+	_ pluginsdk.ActionHandler   = (*tagsPlugin)(nil)
+)
