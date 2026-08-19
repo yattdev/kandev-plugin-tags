@@ -72,7 +72,7 @@ set +e; \
 endef
 
 build: check-sdk
-	$(call with-sdk-override,mkdir -p bin && go build -o $(BIN) ./server/...)
+	$(call with-sdk-override,mkdir -p bin && go build -buildvcs=false -o $(BIN) ./server/...)
 
 run: build
 	./$(BIN)
@@ -94,11 +94,11 @@ package: check-sdk
 	cp README.md $(STAGE)/README.md
 	cp ui/bundle.js $(STAGE)/ui/bundle.js
 	$(call with-sdk-override,\
-		GOOS=linux   GOARCH=amd64 go build -o $(STAGE)/server/plugin-linux-amd64       ./server && \
-		GOOS=linux   GOARCH=arm64 go build -o $(STAGE)/server/plugin-linux-arm64       ./server && \
-		GOOS=darwin  GOARCH=amd64 go build -o $(STAGE)/server/plugin-darwin-amd64      ./server && \
-		GOOS=darwin  GOARCH=arm64 go build -o $(STAGE)/server/plugin-darwin-arm64      ./server && \
-		GOOS=windows GOARCH=amd64 go build -o $(STAGE)/server/plugin-windows-amd64.exe ./server && \
+		GOOS=linux   GOARCH=amd64 go build -buildvcs=false -o $(STAGE)/server/plugin-linux-amd64       ./server && \
+		GOOS=linux   GOARCH=arm64 go build -buildvcs=false -o $(STAGE)/server/plugin-linux-arm64       ./server && \
+		GOOS=darwin  GOARCH=amd64 go build -buildvcs=false -o $(STAGE)/server/plugin-darwin-amd64      ./server && \
+		GOOS=darwin  GOARCH=arm64 go build -buildvcs=false -o $(STAGE)/server/plugin-darwin-arm64      ./server && \
+		GOOS=windows GOARCH=amd64 go build -buildvcs=false -o $(STAGE)/server/plugin-windows-amd64.exe ./server && \
 		PLUGIN_ROOT="$$(pwd)" && \
 		(cd "$$KSDK" && go run ./cmd/plugin-pack -dir "$$PLUGIN_ROOT/$(STAGE)" -out "$$PLUGIN_ROOT/$(PKG_OUT)"))
 	rm -rf $(STAGE)
@@ -111,7 +111,7 @@ package-host: check-sdk
 	cp README.md $(STAGE)/README.md
 	cp ui/bundle.js $(STAGE)/ui/bundle.js
 	$(call with-sdk-override,\
-		go build -o $(STAGE)/server/plugin-$$(go env GOOS)-$$(go env GOARCH)$$(go env GOEXE) ./server && \
+		go build -buildvcs=false -o $(STAGE)/server/plugin-$$(go env GOOS)-$$(go env GOARCH)$$(go env GOEXE) ./server && \
 		PLUGIN_ROOT="$$(pwd)" && \
 		(cd "$$KSDK" && go run ./cmd/plugin-pack -dir "$$PLUGIN_ROOT/$(STAGE)" -out "$$PLUGIN_ROOT/$(PKG_OUT)" -platform-only))
 	rm -rf $(STAGE)

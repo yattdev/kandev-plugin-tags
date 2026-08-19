@@ -894,9 +894,11 @@
       return Promise.resolve();
     }
     return fetchStore(store, function () {
-      return host.api.invokeAction("agent-tags", { workspaceId: workspaceId }).catch(function (err) {
+      return host.api.invokeAction("agent-tags", { workspaceId: workspaceId }).then(function (payload) {
+        return { value: payload };
+      }).catch(function (err) {
         if (!agentTagActionUnavailableLogged) { agentTagActionUnavailableLogged = true; logError("load agent tags", err); }
-        return { tasks: {} };
+        return { value: { tasks: {} } };
       });
     }, sanitizeAgentTags, "agent tags", function () { fetchAgentTags(host, workspaceId); });
   }
