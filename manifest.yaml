@@ -53,7 +53,6 @@ agent_tools:
           enum: [blocked, needs-input, needs-review, failed, obsolete, abandoned]
         note:
           type: string
-          maxLength: 200
     annotations:
       read_only_hint: false
       destructive_hint: false

@@ -84,7 +84,10 @@ func TestManifestDeclaresAgentToolsAndActions(t *testing.T) {
 	require.Equal(t, "add_tag", add.Name)
 	require.Equal(t, []string{"tag"}, add.InputSchema.Required)
 	require.Equal(t, validEnum, add.InputSchema.Properties["tag"].Enum)
-	require.Equal(t, 200, add.InputSchema.Properties["note"].MaxLength)
+	// Long notes must reach the plugin: the backend deliberately truncates
+	// them to 200 runes rather than asking the MCP schema validator to reject
+	// the invocation first.
+	require.Zero(t, add.InputSchema.Properties["note"].MaxLength)
 
 	remove := manifest.AgentTools[1]
 	require.Equal(t, "remove_tag", remove.Name)
