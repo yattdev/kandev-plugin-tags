@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
@@ -60,6 +61,26 @@ func TestHandleActionAgentTagsProjectsVerifiedWorkspace(t *testing.T) {
 	require.Equal(t, "#dc2626", tag["color"])
 	require.Equal(t, "waiting", tag["note"])
 	require.Equal(t, "2026-08-19T00:00:00Z", tag["updatedAt"])
+}
+
+func TestHandleActionAgentTagsProjectsTruncatedToolNote(t *testing.T) {
+	p, _ := newAgentTagTestPlugin()
+	note := strings.Repeat("🦊", 201)
+
+	result, err := p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{
+		"tag":  "blocked",
+		"note": note,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	resp, err := p.HandleAction(context.Background(), actionReq("agent-tags", nil))
+	require.NoError(t, err)
+	body := decodeActionBody(t, resp)
+	tags := body["tasks"].(map[string]any)["task-1"].([]any)
+	projectedNote := tags[0].(map[string]any)["note"].(string)
+	require.Equal(t, strings.Repeat("🦊", 200), projectedNote)
+	require.Len(t, []rune(projectedNote), 200)
 }
 
 func TestHandleActionAgentTagRemoveDeletesTag(t *testing.T) {
