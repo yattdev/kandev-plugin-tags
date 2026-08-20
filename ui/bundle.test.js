@@ -2140,11 +2140,12 @@ test("Tags box trigger uses size icon-lg and the dropdown content is TOPBAR_WIDT
   assert.equal(trigger.props.size, "icon-lg");
 
   const content = tree.children[1];
-  const { TOPBAR_WIDTH } = plugin.__internal;
+  const { TOPBAR_WIDTH, TOPBAR_DROPDOWN_Z_INDEX } = plugin.__internal;
   // An inline width, not a `w-[...]` class: Tailwind only emits an
   // arbitrary-value utility for literals it finds in source it scans, and the
   // host does not scan this bundle (see the TOPBAR_WIDTH comment).
   assert.equal(content.props.style.width, TOPBAR_WIDTH + "px");
+  assert.equal(content.props.style.zIndex, TOPBAR_DROPDOWN_Z_INDEX);
   assert.doesNotMatch(content.props.className, /w-\[/);
 });
 

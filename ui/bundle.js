@@ -94,6 +94,9 @@
   // is not a dependency this plugin should have.
   var TOPBAR_WIDTH = 380;
   var CREATE_BUTTON_WIDTH = 60;
+  // Keep the dropdown above mobile fixed actions such as the Tasks page FAB
+  // (`z-40`) when Radix constrains the content near the viewport bottom.
+  var TOPBAR_DROPDOWN_Z_INDEX = 60;
   var MAX_TAGS_PER_TASK = 12;
   var CONFLICT_RETRY_LIMIT = 1;
   var UNTAGGED_FILTER_VALUE = "__untagged__";
@@ -1797,7 +1800,7 @@
           jsx(ui.DropdownMenuTrigger, { asChild: true }, triggerButton),
           jsx(
             ui.DropdownMenuContent,
-            { align: "end" },
+            { align: "end", style: { zIndex: TOPBAR_DROPDOWN_Z_INDEX } },
             jsx("div", { className: "text-muted-foreground text-xs px-2 py-1.5" }, "Select a workspace to use tags."),
           ),
         );
@@ -1812,7 +1815,7 @@
           {
             align: "end",
             className: "p-2",
-            style: { width: TOPBAR_WIDTH + "px" },
+            style: { width: TOPBAR_WIDTH + "px", zIndex: TOPBAR_DROPDOWN_Z_INDEX },
             "data-testid": "kandev-tags-topbar-content",
           },
           jsx(
@@ -2290,6 +2293,7 @@
       MAX_TAGS_PER_TASK: MAX_TAGS_PER_TASK,
       TOPBAR_WIDTH: TOPBAR_WIDTH,
       CREATE_BUTTON_WIDTH: CREATE_BUTTON_WIDTH,
+      TOPBAR_DROPDOWN_Z_INDEX: TOPBAR_DROPDOWN_Z_INDEX,
       PALETTE: PALETTE,
       DEFAULT_COLOR: DEFAULT_COLOR,
       UNTAGGED_FILTER_VALUE: UNTAGGED_FILTER_VALUE,
