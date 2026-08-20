@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.1] - 2026-08-20
+
+### Fixed
+
+- Register the dense sidebar and `/tasks` chip row in the host's generalized
+  `task-row-metadata` slot. The prior `task-row-tags` slot name is no longer
+  mounted by current hosts, so otherwise the Tags plugin rendered only on
+  kanban cards.
+
 ## [0.6.0] - 2026-08-18
 
 ### Changed
