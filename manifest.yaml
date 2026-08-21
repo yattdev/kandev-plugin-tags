@@ -3,7 +3,7 @@
 # the kandev monorepo for the full schema.
 id: "kandev-plugin-tags"
 api_version: 1
-version: "0.6.0"
+version: "0.6.2"
 display_name: "Tags"
 description: "Add one or more colored tags to a kanban card, stored privately per user, shown as chips on the card, the sidebar task row, and the /tasks list row, with a redesigned top-bar Tags box (icon-lg trigger, aligned rows, palette/hex color picker with explicit Update/Cancel) combining filter and manage (once the host supports it) or a manage-only fallback on older hosts."
 author: "yattdev"
@@ -32,7 +32,7 @@ capabilities:
   user_state: true
 
 # ui.bundle points at the hand-written, no-build ES module frontend half:
-# a task-card-tags chip row (kanban card) and a task-row-tags chip row
+# a task-card-tags chip row (kanban card) and a task-row-metadata chip row
 # (sidebar task row / /tasks list row -- smaller chips, capped at 3 plus a
 # "+N" indicator, no per-chip remove control), an "Add tag..." kanban menu
 # action (with a tag icon) opening a host.ui-built picker modal
