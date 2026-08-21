@@ -84,7 +84,7 @@ agent_tools:
       idempotent_hint: true
 
 # ui.bundle points at the hand-written, no-build ES module frontend half:
-# a task-card-tags chip row (kanban card) and a task-row-tags chip row
+# a task-card-tags chip row (kanban card) and a task-row-metadata chip row
 # (sidebar task row / /tasks list row -- smaller chips, capped at 3 plus a
 # "+N" indicator, no per-chip remove control), an "Add tag..." kanban menu
 # action (with a tag icon) opening a host.ui-built picker modal

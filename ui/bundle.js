@@ -6,7 +6,7 @@
  *
  *   - a "task-card-tags" slot component (TagChips) rendering the current
  *     user's tags for a card as a colored chip row on the kanban card;
- *   - a "task-row-tags" slot component (the same TagChips factory, in its
+ *   - a "task-row-metadata" slot component (the same TagChips factory, in its
  *     dense/non-removable mode) rendering that same chip row -- smaller,
  *     capped at 3 chips plus a "+N" indicator, no per-chip remove button --
  *     for the sidebar task row and the `/tasks` list row;
@@ -94,6 +94,9 @@
   // is not a dependency this plugin should have.
   var TOPBAR_WIDTH = 380;
   var CREATE_BUTTON_WIDTH = 60;
+  // Keep the dropdown above mobile fixed actions such as the Tasks page FAB
+  // (`z-40`) when Radix constrains the content near the viewport bottom.
+  var TOPBAR_DROPDOWN_Z_INDEX = 60;
   var MAX_TAGS_PER_TASK = 12;
   var CONFLICT_RETRY_LIMIT = 1;
   var UNTAGGED_FILTER_VALUE = "__untagged__";
@@ -173,7 +176,7 @@
     lineHeight: 1,
     fontSize: "11px",
   };
-  // Dense variant for the task-row-tags slot (sidebar row / /tasks list
+  // Dense variant for the task-row-metadata slot (sidebar row / /tasks list
   // row) -- smaller padding/font than the kanban card's task-card-tags
   // chips, and (see makeTagChips) no per-chip remove control.
   var DENSE_CHIP_ROW_STYLE = { display: "flex", flexWrap: "nowrap", gap: "3px", alignItems: "center", overflow: "hidden" };
@@ -731,13 +734,13 @@
   // ---------------------------------------------------------------------
   // Shared data layer
   //
-  // Every chip-rendering surface (task-card-tags, task-row-tags, the Tags
+  // Every chip-rendering surface (task-card-tags, task-row-metadata, the Tags
   // box, the add-tag picker modal) needs the same two things: the active
   // workspace's tag catalog, and a given task's applied tag-id list.
   // Before this layer existed, each mounted component held its own
   // independent useState/useEffect copy (see the old useStorageValue),
   // so N cards showing chips for the same task -- or just task-card-tags
-  // and task-row-tags both mounted for one card -- issued N redundant
+  // and task-row-metadata both mounted for one card -- issued N redundant
   // `host.storage.get` calls and N redundant `host.storage.subscribe`
   // registrations for the very same (scope, scopeId, key).
   //
@@ -1097,7 +1100,7 @@
    * Builds a chip-row slot component. `opts.removable` (default `true`)
    * controls whether each chip carries its own remove ("\u00d7") button --
    * `task-card-tags` keeps it (removal from the kanban card chip row
-   * itself); `task-row-tags` (the sidebar row / `/tasks` list row) omits
+   * itself); `task-row-metadata` (the sidebar row / `/tasks` list row) omits
    * it, since removal there stays confined to the "Add tag..." modal.
    * `opts.dense` (default `false`) switches to smaller chip padding/font
    * and caps visible chips at TASK_ROW_CHIP_LIMIT with a trailing `+N`
@@ -1863,7 +1866,7 @@
           jsx(ui.DropdownMenuTrigger, { asChild: true }, triggerButton),
           jsx(
             ui.DropdownMenuContent,
-            { align: "end" },
+            { align: "end", style: { zIndex: TOPBAR_DROPDOWN_Z_INDEX } },
             jsx("div", { className: "text-muted-foreground text-xs px-2 py-1.5" }, "Select a workspace to use tags."),
           ),
         );
@@ -1878,7 +1881,7 @@
           {
             align: "end",
             className: "p-2",
-            style: { width: TOPBAR_WIDTH + "px" },
+            style: { width: TOPBAR_WIDTH + "px", zIndex: TOPBAR_DROPDOWN_Z_INDEX },
             "data-testid": "kandev-tags-topbar-content",
           },
           jsx(
@@ -2284,7 +2287,7 @@
       // Sidebar row / `/tasks` list row: smaller chips, no per-chip remove
       // (removal stays confined to the "Add tag..." modal), capped at
       // TASK_ROW_CHIP_LIMIT visible chips plus a "+N" indicator.
-      registry.registerComponent("task-row-tags", makeTagChips(host, { removable: false, dense: true }));
+      registry.registerComponent("task-row-metadata", makeTagChips(host, { removable: false, dense: true }));
       registry.registerComponent("main-top-bar", makeTagsTopBarDropdown(host, capabilities));
 
       registry.registerTaskMenuAction({
@@ -2356,6 +2359,7 @@
       MAX_TAGS_PER_TASK: MAX_TAGS_PER_TASK,
       TOPBAR_WIDTH: TOPBAR_WIDTH,
       CREATE_BUTTON_WIDTH: CREATE_BUTTON_WIDTH,
+      TOPBAR_DROPDOWN_Z_INDEX: TOPBAR_DROPDOWN_Z_INDEX,
       PALETTE: PALETTE,
       DEFAULT_COLOR: DEFAULT_COLOR,
       UNTAGGED_FILTER_VALUE: UNTAGGED_FILTER_VALUE,

@@ -905,7 +905,7 @@ test("bundle registers the task-card-tags slot, the main-top-bar button, and the
     host,
   );
   assert.ok(registered.components.some((c) => c.slot === "task-card-tags"));
-  assert.ok(registered.components.some((c) => c.slot === "task-row-tags"));
+  assert.ok(registered.components.some((c) => c.slot === "task-row-metadata"));
   assert.ok(registered.components.some((c) => c.slot === "main-top-bar"));
   const addTagAction = registered.menuActions.find((a) => a.id === "add-tag");
   assert.ok(addTagAction, "registers an add-tag menu action");
@@ -914,11 +914,11 @@ test("bundle registers the task-card-tags slot, the main-top-bar button, and the
 });
 
 // -----------------------------------------------------------------------
-// task-row-tags: dense, non-removable chip row for the sidebar row and the
+// task-row-metadata: dense, non-removable chip row for the sidebar row and the
 // /tasks list row.
 // -----------------------------------------------------------------------
 
-test("task-row-tags renders chips with no remove control", async () => {
+test("task-row-metadata renders chips with no remove control", async () => {
   const plugin = loadBundle();
   let TaskRowTags;
   const fakeHost = makeFakeReactHost();
@@ -933,13 +933,13 @@ test("task-row-tags renders chips with no remove control", async () => {
   plugin.initialize(
     {
       registerComponent(slot, Component) {
-        if (slot === "task-row-tags") TaskRowTags = Component;
+        if (slot === "task-row-metadata") TaskRowTags = Component;
       },
       registerTaskMenuAction() {},
     },
     fakeHost,
   );
-  assert.ok(TaskRowTags, "task-row-tags component registered");
+  assert.ok(TaskRowTags, "task-row-metadata component registered");
 
   const getTree = fakeHost.mount(TaskRowTags, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
   await flush();
@@ -947,10 +947,10 @@ test("task-row-tags renders chips with no remove control", async () => {
   const row = getTree();
   const chip = row.children[0][0];
   assert.equal(chip.children[0], "urgent");
-  assert.equal(chip.children.length, 1, "no remove button child on a task-row-tags chip");
+  assert.equal(chip.children.length, 1, "no remove button child on a task-row-metadata chip");
 });
 
-test("task-row-tags caps at 3 visible chips and shows a +N indicator beyond the cap", async () => {
+test("task-row-metadata caps at 3 visible chips and shows a +N indicator beyond the cap", async () => {
   const plugin = loadBundle();
   let TaskRowTags;
   const fakeHost = makeFakeReactHost();
@@ -966,7 +966,7 @@ test("task-row-tags caps at 3 visible chips and shows a +N indicator beyond the 
   plugin.initialize(
     {
       registerComponent(slot, Component) {
-        if (slot === "task-row-tags") TaskRowTags = Component;
+        if (slot === "task-row-metadata") TaskRowTags = Component;
       },
       registerTaskMenuAction() {},
     },
@@ -984,7 +984,7 @@ test("task-row-tags caps at 3 visible chips and shows a +N indicator beyond the 
   assert.equal(more.children[0], "+2");
 });
 
-test("task-row-tags shows no +N indicator at or under the 3-chip cap", async () => {
+test("task-row-metadata shows no +N indicator at or under the 3-chip cap", async () => {
   const plugin = loadBundle();
   let TaskRowTags;
   const fakeHost = makeFakeReactHost();
@@ -1000,7 +1000,7 @@ test("task-row-tags shows no +N indicator at or under the 3-chip cap", async () 
   plugin.initialize(
     {
       registerComponent(slot, Component) {
-        if (slot === "task-row-tags") TaskRowTags = Component;
+        if (slot === "task-row-metadata") TaskRowTags = Component;
       },
       registerTaskMenuAction() {},
     },
@@ -1223,7 +1223,7 @@ test("agent tag refresh interval is cleared on re-entrant initialize and destroy
     plugin.initialize(
       {
         registerComponent(slot, Component) {
-          if (slot === "task-row-tags") TaskRowTags = Component;
+          if (slot === "task-row-metadata") TaskRowTags = Component;
         },
         registerTaskMenuAction() {},
       },
@@ -1685,7 +1685,7 @@ test("a re-entrant initialize() (no destroy) re-subscribes and re-fetches the sh
     },
   };
 
-  /** Registers against a fresh fake-React host, returning that load's task-row-tags component. */
+  /** Registers against a fresh fake-React host, returning that load's task-row-metadata component. */
   function loadAgainst() {
     const host = makeFakeReactHost();
     host.store = sharedStore;
@@ -1700,7 +1700,7 @@ test("a re-entrant initialize() (no destroy) re-subscribes and re-fetches the sh
       },
       host,
     );
-    return { host, RowTags: components["task-row-tags"] };
+    return { host, RowTags: components["task-row-metadata"] };
   }
 
   const first = loadAgainst();
@@ -2376,11 +2376,12 @@ test("Tags box trigger uses size icon-lg and the dropdown content is TOPBAR_WIDT
   assert.equal(trigger.props.size, "icon-lg");
 
   const content = tree.children[1];
-  const { TOPBAR_WIDTH } = plugin.__internal;
+  const { TOPBAR_WIDTH, TOPBAR_DROPDOWN_Z_INDEX } = plugin.__internal;
   // An inline width, not a `w-[...]` class: Tailwind only emits an
   // arbitrary-value utility for literals it finds in source it scans, and the
   // host does not scan this bundle (see the TOPBAR_WIDTH comment).
   assert.equal(content.props.style.width, TOPBAR_WIDTH + "px");
+  assert.equal(content.props.style.zIndex, TOPBAR_DROPDOWN_Z_INDEX);
   assert.doesNotMatch(content.props.className, /w-\[/);
 });
 
