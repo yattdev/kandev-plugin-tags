@@ -3,9 +3,9 @@
 # the kandev monorepo for the full schema.
 id: "kandev-plugin-tags"
 api_version: 1
-version: "0.9.0"
+version: "0.10.0"
 display_name: "Tags"
-description: "Create and apply workspace-shared colored tags from the board or an agent. Humans manage every shared tag; agents manage only agent-created tags, which display a bot marker when applied."
+description: "Create and apply workspace-shared colored tags from the board or an agent. Humans manage every shared tag; agents manage only agent-created tags, which display a bot marker when applied. On compatible hosts, the Tags box uses a single-select board filter (All, one tag, or Untagged) and contributes page-local Tag Sort/Group options to /tasks; older hosts retain management and the existing filter fallback."
 author: "yattdev"
 repo_url: "https://github.com/yattdev/kandev-plugin-tags"
 categories: ["tools"]
@@ -161,8 +161,12 @@ agent_tools:
 #     control.
 #   - host has registerTaskFilter + host.taskFilters + host.storage.listByKey:
 #     this dropdown becomes the filter *and* the manager in one place
-#     (checkbox rows, inline rename, delete with an exact "used by N cards"
+#     (a labeled single-select with All tags, one colored tag, or Untagged;
+#     inline rename; delete with an exact "used by N cards"
 #     count and cascade removal) -- the built-in dropdown's section is
 #     hidden so there is exactly one Tags control.
+#   - host also has registerTaskListFacet: the plugin contributes Tag Sort and
+#     Group choices to /tasks. Those choices are client-side over the current
+#     loaded page; they never expose private tag storage to backend queries.
 ui:
   bundle: "/ui/bundle.js"

@@ -32,7 +32,7 @@ func TestManifestDeclaresSharedCatalogContract(t *testing.T) {
 	require.NoError(t, err)
 	var manifest testManifest
 	require.NoError(t, yaml.Unmarshal(data, &manifest))
-	require.Equal(t, "0.8.3", manifest.Version)
+	require.Equal(t, "0.10.0", manifest.Version)
 	require.Equal(t, []string{"shared-tags", "tag-create", "tag-update", "tag-delete", "task-tag-add", "task-tag-remove"}, func() []string {
 		out := make([]string, len(manifest.Actions))
 		for i := range manifest.Actions {

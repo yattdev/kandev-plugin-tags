@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.10.0] - 2026-08-22
+
+### Added
+
+- Replaced the top-bar tag checkbox filter with a labeled single-select for
+  **All tags**, one colored tag, or **Untagged**.
+- On hosts with the new task-list facet API, added page-local `/tasks` Tag
+  sorting and multi-membership colored grouping while preserving the older
+  host compatibility tiers. The facet resolves tags from the shared
+  workspace catalog (falling back to the legacy private catalog on older
+  hosts), matching the board filter's data source.
+
 ## [0.9.0] - 2026-08-22
 
 ### Changed
