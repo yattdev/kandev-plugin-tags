@@ -3,9 +3,9 @@
 # the kandev monorepo for the full schema.
 id: "kandev-plugin-tags"
 api_version: 1
-version: "0.6.2"
+version: "0.8.3"
 display_name: "Tags"
-description: "Add one or more colored tags to a kanban card, stored privately per user, shown as chips on the card, the sidebar task row, and the /tasks list row, with a redesigned top-bar Tags box (icon-lg trigger, aligned rows, palette/hex color picker with explicit Update/Cancel) combining filter and manage (once the host supports it) or a manage-only fallback on older hosts."
+description: "Create and apply workspace-shared colored tags from the board or an agent. Humans manage every shared tag; agents manage only agent-created tags, which display a bot marker when applied."
 author: "yattdev"
 repo_url: "https://github.com/yattdev/kandev-plugin-tags"
 categories: ["tools"]
@@ -13,9 +13,7 @@ categories: ["tools"]
 # runtime.executables maps each supported platform to the binary kandev
 # spawns as a gRPC subprocess. `make package` cross-compiles all five;
 # `make package-host` builds just the current one. This plugin's backend is a
-# no-op (pluginsdk.UnimplementedPlugin) -- all tag behavior lives in the
-# frontend UI bundle against host.storage, so the binary exists only to
-# satisfy runtime.type: binary.
+# backend serves the workspace-shared tag catalog and its task applications.
 runtime:
   type: binary
   executables:
@@ -25,11 +23,123 @@ runtime:
     darwin-arm64: "server/plugin-darwin-arm64"
     windows-amd64: "server/plugin-windows-amd64.exe"
 
-# user_state enables the authenticated, per-user Host storage API
-# (host.storage.get/set/delete/list/subscribe, scope "task") that this
-# plugin uses to store each user's own tags on a card, privately.
+# user_state remains enabled to render a user's pre-0.8 legacy tags without
+# data loss. New tags use the workspace state/actions declared below.
 capabilities:
   user_state: true
+  state: true
+
+actions:
+  - key: "shared-tags"
+    scope: "workspace"
+    max_body_bytes: 4096
+  - key: "tag-create"
+    scope: "workspace"
+    max_body_bytes: 1024
+  - key: "tag-update"
+    scope: "workspace"
+    max_body_bytes: 1024
+  - key: "tag-delete"
+    scope: "workspace"
+    max_body_bytes: 1024
+  - key: "task-tag-add"
+    scope: "task"
+    max_body_bytes: 1024
+  - key: "task-tag-remove"
+    scope: "task"
+    max_body_bytes: 1024
+
+agent_tools:
+  - name: create_tag
+    description: Create an agent-owned tag in the shared workspace catalog.
+    surfaces: [kanban-task]
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          maxLength: 22
+        color:
+          type: string
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: false
+  - name: update_tag
+    description: Rename or recolor an agent-created shared tag.
+    surfaces: [kanban-task]
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: [tag_id]
+      properties:
+        tag_id:
+          type: string
+        name:
+          type: string
+          maxLength: 22
+        color:
+          type: string
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: true
+  - name: delete_tag
+    description: Delete an agent-created tag and remove it from every task.
+    surfaces: [kanban-task]
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: [tag_id]
+      properties:
+        tag_id:
+          type: string
+    annotations:
+      read_only_hint: false
+      destructive_hint: true
+      idempotent_hint: true
+  - name: add_tag
+    description: Add or update an agent-created tag on the current task.
+    surfaces: [kanban-task]
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: [tag_id]
+      properties:
+        tag_id:
+          type: string
+        note:
+          type: string
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: true
+  - name: remove_tag
+    description: Remove this agent's application of an agent-created tag.
+    surfaces: [kanban-task]
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: [tag_id]
+      properties:
+        tag_id:
+          type: string
+    annotations:
+      read_only_hint: false
+      destructive_hint: false
+      idempotent_hint: true
+  - name: list_tags
+    description: List the shared catalog and tags applied to the current task.
+    surfaces: [kanban-task]
+    input_schema:
+      type: object
+      additionalProperties: false
+    annotations:
+      read_only_hint: true
+      destructive_hint: false
+      idempotent_hint: true
 
 # ui.bundle points at the hand-written, no-build ES module frontend half:
 # a task-card-tags chip row (kanban card) and a task-row-metadata chip row

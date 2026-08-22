@@ -4,8 +4,79 @@
 
 [Screencast from 2026-08-10 20-27-55.webm](https://github.com/user-attachments/assets/48e20153-c77d-4816-83a2-d9a9fa7c37a3)
 
-Add one or more colored tags to any kanban card. Tags are yours alone: each
-user's tags and tag catalog are private and never shown to teammates.
+Add one or more colored tags to any kanban card. New tags are a shared
+workspace catalog: people and agents see the same definitions and task chips.
+Humans can manage every shared tag; agents can manage only agent-created tags.
+
+## Shared tags and agent tools
+
+The shared catalog has no fixed status vocabulary. A person creates, renames,
+recolors, applies, and deletes any tag from the existing picker and Tags box.
+An agent on a kanban task receives `create_tag`, `update_tag`, `delete_tag`,
+`add_tag`, `remove_tag`, and `list_tags` MCP tools. Agents may create and
+manage any tag whose origin is `agent`, including one made by a different
+agent; they cannot modify a human-created definition. Agent `add_tag` takes a
+`tag_id` from `list_tags` or `create_tag` and may include a note up to 200
+characters.
+
+When an agent creates or applies a tag, its chip is workspace-shared and shows
+the same yellow robot glyph used for autopilot tasks, as well as a dashed
+border and an accessible “applied by agent” label. An agent-created definition
+keeps that marker even when a person later applies it; a person can remove any
+chip entirely. The UI refreshes shared tags on focus and at most every 30
+seconds.
+
+Tags created before 0.8.0 in private browser storage are preserved and still
+render for their owner. They cannot be safely auto-migrated or shared because
+the host intentionally does not expose another user's private storage to the
+plugin backend; create a shared tag when you want agents and teammates to use
+it.
+
+### Agent MCP workflow
+
+The tools are exposed only while an agent is running on a kanban task. Kandev
+binds the invocation to that task and workspace, so the agent must never pass
+or invent a task or workspace id.
+
+| Tool | Purpose | Required input |
+| --- | --- | --- |
+| `create_tag` | Create an agent-owned shared definition. | `name`; optional hex `color` |
+| `list_tags` | Read the shared catalog and current task applications. | none |
+| `update_tag` | Rename and/or recolor an agent-owned definition. | `tag_id`, plus `name` and/or `color` |
+| `add_tag` | Apply an agent-owned tag to the current task. | `tag_id`; optional `note` |
+| `remove_tag` | Remove the agent application from the current task. | `tag_id` |
+| `delete_tag` | Delete an agent-owned definition and every application of it. | `tag_id` |
+
+`create_tag` and `list_tags` return `structuredContent.catalog`; copy the
+returned tag `id` into later calls. `add_tag` updates the existing agent
+application rather than duplicating it, and truncates notes to 200 characters.
+`remove_tag` is safe to retry. `delete_tag` is intentionally destructive: it
+removes the definition from all workspace tasks, so prefer `remove_tag` when a
+task has merely become unblocked or complete.
+
+Example instruction to give an agent:
+
+```text
+Use the Tags plugin MCP tools for this task.
+
+1. Call create_tag with {"name":"Waiting on design","color":"#f59e0b"}.
+2. Copy the returned catalog entry's id.
+3. Call add_tag with that tag_id and note "Need final empty-state copy".
+4. Call list_tags and confirm the tag is applied to this task.
+5. When the copy arrives, call update_tag with the same tag_id, name
+   "Ready for implementation", and color "#2563eb".
+
+Leave the tag applied so a person can see the robot-marked chip. Do not delete
+the definition unless it is no longer useful anywhere in the workspace.
+```
+
+For cleanup after a task-specific tag is no longer needed:
+
+```text
+Call remove_tag with the tag_id, then call list_tags to confirm it is gone from
+this task. Call delete_tag only if the agent-created definition should also be
+removed from every other task in this workspace.
+```
 
 - **On every card**: tags you've added render as a row of small colored
   chips below the card's other badges. No tags, no row -- the row only
@@ -62,15 +133,17 @@ platforms) and install the tarball via **Settings > Plugins > Install** or
 
 ## How it works and what it reads
 
-Tags is a per-card, per-user annotation tool. It does not call an agent,
-read a conversation, or analyze work.
+Tags is a per-card annotation tool. It does not read a conversation or analyze
+work. Its shared catalog and task applications live in workspace plugin state,
+and are exposed to the browser only through declared, host-authorized plugin
+actions. A tag definition records an `agent` or `human` origin; a task
+application separately records human and agent presence so agents never erase
+human state.
 
-The plugin keeps two things in kandev Host per-user state (`host.storage`):
-
-- a **tag catalog** -- one array of `{ id, name, color }` per
-  (user, workspace) pair, scope `workspace`, key `tags-catalog`;
-- **applied tag ids** -- one array of catalog tag ids per (user, card) pair,
-  scope `task`, key `tags`.
+For backwards compatibility only, the UI still reads an owner's pre-0.8.0
+private `host.storage` catalog and task ids, and renders those chips beside the
+shared layer. New interactions use the shared actions whenever the host
+supports them.
 
 It stores nothing else: no conversation content, no token data. On a host
 that supports `host.storage.listByKey`, the plugin also issues a read-only
@@ -80,9 +153,10 @@ deleted tag from every one of those cards, and to keep the board filter
 correct even for cards that haven't scrolled into view yet -- on an older
 host without that API this all degrades gracefully (no count, no cascade,
 filter only reasons about cards whose chips have actually rendered).
-Because storage is per-user, two people looking at the same card, or the
-same workspace's tag catalog, each see only their own; adding, removing, or
-even the presence of any tags is invisible to teammates.
+Shared tags are visible to everyone who can access the workspace. The host
+authorizes every browser action against the signed-in person and constrains
+each agent invocation to its running task/session; no task or workspace id is
+accepted in an agent-tool input.
 
 Cards tagged before this release (a plain array of tag-name strings, no
 catalog) keep working: an id that isn't found in the catalog is rendered

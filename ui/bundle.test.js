@@ -36,19 +36,21 @@ const bundleSource = fs.readFileSync(path.join(__dirname, "bundle.js"), "utf8");
  */
 function loadBundle(consoleOverride, extraGlobals) {
   let plugin = null;
+  const mergedGlobals = Object.assign({}, extraGlobals);
+  const defaultWindow = {
+    registerKandevPlugin(id, definition) {
+      assert.equal(id, "kandev-plugin-tags");
+      plugin = definition;
+    },
+  };
+  mergedGlobals.window = Object.assign(defaultWindow, (extraGlobals && extraGlobals.window) || {});
   const context = Object.assign(
     {
       console: consoleOverride || console,
       setTimeout,
       clearTimeout,
-      window: {
-        registerKandevPlugin(id, definition) {
-          assert.equal(id, "kandev-plugin-tags");
-          plugin = definition;
-        },
-      },
     },
-    extraGlobals,
+    mergedGlobals,
   );
   vm.runInNewContext(bundleSource, context, { filename: "ui/bundle.js" });
   assert.ok(plugin, "bundle registered the plugin");
@@ -1010,6 +1012,246 @@ test("task-row-metadata shows no +N indicator at or under the 3-chip cap", async
 
   const row = getTree();
   assert.equal(row.children[1], null, "no +N indicator under the cap");
+});
+
+test("agent status tags render before user tags on card chips from direct invokeAction JSON", async () => {
+  const plugin = loadBundle();
+  const { makeTagChips } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "task") return Promise.resolve({ value: ["t1"], updatedAt: "t0" });
+      return Promise.resolve({ value: [{ id: "t1", name: "urgent", color: "#ef4444" }], updatedAt: "t0" });
+    },
+    subscribe: () => () => {},
+  };
+  fakeHost.api = {
+    invokeAction(key, input) {
+      assert.equal(key, "shared-tags");
+      assertStructural.deepEqual(input, { workspaceId: "ws-1" });
+      return Promise.resolve({
+        tags: [],
+        tasks: {
+          "task-1": [
+            {
+              id: "blocked",
+              name: "Blocked",
+              color: "#dc2626",
+              agent: true,
+              agentApplied: true,
+              note: "waiting on API keys",
+              updatedAt: "2026-08-19T00:00:00Z",
+            },
+          ],
+        },
+      });
+    },
+  };
+
+  const getTree = fakeHost.mount(makeTagChips(fakeHost, { removable: true }), {
+    slotProps: { taskId: "task-1", workspaceId: "ws-1" },
+  });
+  await flush();
+
+  const chips = getTree().children[0];
+  assert.equal(chips[0].children[1], "Blocked", "agent chip is rendered before user chips");
+  assert.equal(chips[0].children[0].props["data-testid"], "kandev-tags-agent-icon");
+  assert.equal(chips[0].props["data-agent"], "true");
+  assert.equal(chips[0].props.style.border, "1px dashed currentColor");
+  assert.equal(chips[0].props.title, "Blocked — applied by agent: waiting on API keys");
+  assert.equal(chips[0].props["aria-label"], "Blocked — applied by agent: waiting on API keys");
+  assert.equal(chips[1].children[0], "urgent");
+});
+
+test("agent status tags render on dense task rows without a remove control and count toward +N", async () => {
+  const plugin = loadBundle();
+  const { makeTagChips } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "task") return Promise.resolve({ value: ["t1", "t2"], updatedAt: "t0" });
+      return Promise.resolve({
+        value: [
+          { id: "t1", name: "urgent", color: "#ef4444" },
+          { id: "t2", name: "docs", color: "#22c55e" },
+        ],
+        updatedAt: "t0",
+      });
+    },
+    subscribe: () => () => {},
+  };
+  fakeHost.api = {
+    invokeAction() {
+      return Promise.resolve({
+        tags: [],
+        tasks: {
+          "task-1": [
+            { id: "blocked", name: "Blocked", color: "#dc2626", agent: true, agentApplied: true, note: "", updatedAt: "t1" },
+            { id: "needs-input", name: "Needs input", color: "#f59e0b", agent: true, agentApplied: true, note: "", updatedAt: "t2" },
+          ],
+        },
+      });
+    },
+  };
+
+  const getTree = fakeHost.mount(makeTagChips(fakeHost, { removable: false, dense: true }), {
+    slotProps: { taskId: "task-1", workspaceId: "ws-1" },
+  });
+  await flush();
+
+  const row = getTree();
+  const chips = row.children[0];
+  assert.equal(chips.length, 3, "dense rows still cap at three total chips");
+  assertStructural.deepEqual(chips.map((chip) => (chip.props["data-agent"] ? chip.children[1] : chip.children[0])), ["Blocked", "Needs input", "urgent"]);
+  assert.equal(chips[0].children.length, 2, "dense agent chip has a bot marker but no remove button");
+  assert.equal(row.children[1].children[0], "+1", "hidden user tag is counted in +N");
+});
+
+test("agent status chip removal invokes the task action and refreshes the shared store", async () => {
+  const plugin = loadBundle();
+  const { makeTagChips } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "task") return Promise.resolve({ value: [], updatedAt: "t0" });
+      return Promise.resolve({ value: [], updatedAt: "t0" });
+    },
+    subscribe: () => () => {},
+  };
+  const calls = [];
+  let removed = false;
+  fakeHost.api = {
+    invokeAction(key, input) {
+      calls.push({ key, input });
+      if (key === "task-tag-remove") {
+        removed = true;
+        return Promise.resolve({ tags: [] });
+      }
+      return Promise.resolve({
+        tags: [],
+        tasks: removed
+          ? {}
+          : { "task-1": [{ id: "blocked", name: "Blocked", color: "#dc2626", agent: true, agentApplied: true, note: "", updatedAt: "t1" }] },
+      });
+    },
+  };
+
+  const getTree = fakeHost.mount(makeTagChips(fakeHost, { removable: true }), {
+    slotProps: { taskId: "task-1", workspaceId: "ws-1" },
+  });
+  await flush();
+  getTree().children[0][0].children[2].props.onClick({ stopPropagation() {} });
+  await flush();
+
+  assert.equal(calls[0].key, "shared-tags", "initial load reads the shared workspace catalog");
+  assertStructural.deepEqual(calls[1], {
+    key: "task-tag-remove",
+    input: { taskId: "task-1", body: { tagId: "blocked" } },
+  });
+  assert.equal(calls[2].key, "shared-tags", "successful removal refreshes the shared workspace store");
+  assert.equal(getTree(), null, "the chip row disappears after the refreshed store no longer has tags");
+});
+
+test("agent tag action absence or rejection degrades to user tags without throwing", async () => {
+  const missingActionPlugin = loadBundle();
+  const { makeTagChips: makeMissingActionChips } = missingActionPlugin.__internal;
+  const missingActionHost = makeFakeReactHost();
+  missingActionHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  missingActionHost.storage = {
+    get(scope) {
+      if (scope === "task") return Promise.resolve({ value: ["t1"], updatedAt: "t0" });
+      return Promise.resolve({ value: [{ id: "t1", name: "urgent", color: "#ef4444" }], updatedAt: "t0" });
+    },
+    subscribe: () => () => {},
+  };
+  const missingTree = missingActionHost.mount(makeMissingActionChips(missingActionHost, { removable: true }), {
+    slotProps: { taskId: "task-1", workspaceId: "ws-1" },
+  });
+  await flush();
+  assert.equal(missingTree().children[0][0].children[0], "urgent");
+
+  const { console: fakeConsole, calls } = makeFakeConsole();
+  const rejectingPlugin = loadBundle(fakeConsole);
+  const { makeTagChips: makeRejectingChips } = rejectingPlugin.__internal;
+  const rejectingHost = makeFakeReactHost();
+  rejectingHost.store = missingActionHost.store;
+  rejectingHost.storage = missingActionHost.storage;
+  rejectingHost.api = { invokeAction: () => Promise.reject(new Error("404")) };
+  const rejectingTree = rejectingHost.mount(makeRejectingChips(rejectingHost, { removable: true }), {
+    slotProps: { taskId: "task-1", workspaceId: "ws-1" },
+  });
+  await flush();
+
+  assert.equal(rejectingTree().children[0][0].children[0], "urgent");
+  assert.equal(calls.error.length, 1, "a rejecting action is logged once");
+  assert.match(String(calls.error[0][0]), /load shared tags/);
+});
+
+test("agent tag refresh interval is cleared on re-entrant initialize and destroy", async () => {
+  let plugin;
+  let nextTimer = 1;
+  const activeTimers = new Set();
+  const addedListeners = [];
+  const removedListeners = [];
+  const fakeWindow = {
+    setInterval() {
+      const id = nextTimer++;
+      activeTimers.add(id);
+      return id;
+    },
+    clearInterval(id) {
+      activeTimers.delete(id);
+    },
+    addEventListener(type, listener) {
+      addedListeners.push({ type, listener });
+    },
+    removeEventListener(type, listener) {
+      removedListeners.push({ type, listener });
+    },
+  };
+  plugin = loadBundle(null, { window: fakeWindow });
+
+  function mountRegisteredRow() {
+    let TaskRowTags;
+    const host = makeFakeReactHost();
+    host.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+    host.storage = {
+      get(scope) {
+        if (scope === "task") return Promise.resolve({ value: [], updatedAt: "t0" });
+        return Promise.resolve({ value: [], updatedAt: "t0" });
+      },
+      subscribe: () => () => {},
+    };
+    host.api = { invokeAction: () => Promise.resolve({ tasks: {} }) };
+    plugin.initialize(
+      {
+        registerComponent(slot, Component) {
+          if (slot === "task-row-metadata") TaskRowTags = Component;
+        },
+        registerTaskMenuAction() {},
+      },
+      host,
+    );
+    host.mount(TaskRowTags, { slotProps: { taskId: "task-1", workspaceId: "ws-1" } });
+    return host;
+  }
+
+  mountRegisteredRow();
+  await flush();
+  assert.equal(activeTimers.size, 1, "first mount starts one refresh interval");
+
+  mountRegisteredRow();
+  await flush();
+  assert.equal(activeTimers.size, 1, "re-entrant initialize clears the old interval before starting a new one");
+  assert.equal(removedListeners.length, 1, "re-entrant initialize removes the old focus listener");
+
+  plugin.destroy();
+  assert.equal(activeTimers.size, 0, "destroy clears the active refresh interval");
+  assert.equal(addedListeners.length, 2);
+  assert.equal(removedListeners.length, 2, "destroy removes the active focus listener");
 });
 
 // -----------------------------------------------------------------------
