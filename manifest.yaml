@@ -3,9 +3,9 @@
 # the kandev monorepo for the full schema.
 id: "kandev-plugin-tags"
 api_version: 1
-version: "0.6.2"
+version: "0.7.0"
 display_name: "Tags"
-description: "Add one or more colored tags to a kanban card, stored privately per user, shown as chips on the card, the sidebar task row, and the /tasks list row, with a redesigned top-bar Tags box (icon-lg trigger, aligned rows, palette/hex color picker with explicit Update/Cancel) combining filter and manage (once the host supports it) or a manage-only fallback on older hosts."
+description: "Add private colored tags to Kanban cards and task rows. On compatible hosts, the Tags box uses a single-select board filter (All, one tag, or Untagged) and contributes page-local Tag Sort/Group options to /tasks; older hosts retain management and the existing filter fallback."
 author: "yattdev"
 repo_url: "https://github.com/yattdev/kandev-plugin-tags"
 categories: ["tools"]
@@ -51,8 +51,12 @@ capabilities:
 #     control.
 #   - host has registerTaskFilter + host.taskFilters + host.storage.listByKey:
 #     this dropdown becomes the filter *and* the manager in one place
-#     (checkbox rows, inline rename, delete with an exact "used by N cards"
+#     (a labeled single-select with All tags, one colored tag, or Untagged;
+#     inline rename; delete with an exact "used by N cards"
 #     count and cascade removal) -- the built-in dropdown's section is
 #     hidden so there is exactly one Tags control.
+#   - host also has registerTaskListFacet: the plugin contributes Tag Sort and
+#     Group choices to /tasks. Those choices are client-side over the current
+#     loaded page; they never expose private tag storage to backend queries.
 ui:
   bundle: "/ui/bundle.js"

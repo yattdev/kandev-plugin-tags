@@ -30,20 +30,29 @@ user's tags and tag catalog are private and never shown to teammates.
   (independent of the Add tag modal -- creating a tag here works the same
   way: trimmed, deduplicated case-insensitively, a specific error if the
   name already exists). On a host new enough to support it
-  (`host.taskFilters`/`host.storage.listByKey`), each row also gets a
-  checkbox, and checking one filters the board to cards carrying that tag
-  (multi-select is OR). The same dropdown is where you recolor (click the
+  (`host.taskFilters`/`host.storage.listByKey`), the box instead includes a
+  labeled single-select: **All tags**, one colored option per catalog tag, or
+  **Untagged**. Choosing a tag filters the board to that one tag; All tags
+  clears the selection. The same dropdown is where you recolor (click the
   swatch to open a picker box with the color palette, a custom hex input,
   and a live preview -- nothing is written until you press **Update**;
   **Cancel** discards your pick), rename (click a pill), or delete a tag --
   delete asks for confirmation stating the exact number of cards carrying
   the tag, and removes it from both the catalog and every one of those
   cards. On an older host without `host.taskFilters`/`host.storage.listByKey`,
-  the checkboxes are omitted and, if the host at least ships
+  the single-select is omitted and, if the host at least ships
   `registerTaskFilter`, the board's existing built-in filter dropdown keeps
   its own "Tags" section/Untagged option instead, so filtering is never
   lost, only relocated depending on what the host supports -- creating,
   recoloring, renaming, and deleting stay available here regardless of tier.
+- **Task list Sort and Group**: on hosts that expose
+  `registerTaskListFacet`, this plugin contributes **Tag** to `/tasks` Sort
+  and Group. Sorting uses the alphabetically first resolved tag name
+  (case-insensitive), keeps untagged tasks last, and preserves the incoming
+  order for ties. Grouping creates a colored section for every tag and an
+  Untagged section; multi-tag tasks appear in each matching section. This is
+  deliberately page-local: it operates on the task rows already loaded by
+  `/tasks`, not across backend pages.
 - **Remove a tag from a card**: click the `x` on a chip on the card itself,
   or click it off in the Add tag modal.
 - Tag names are trimmed, capped at 22 characters, deduplicated

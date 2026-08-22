@@ -99,6 +99,9 @@
   var TOPBAR_DROPDOWN_Z_INDEX = 60;
   var MAX_TAGS_PER_TASK = 12;
   var CONFLICT_RETRY_LIMIT = 1;
+  // Radix Select reserves the empty string for clearing its own value, so
+  // use a private non-empty sentinel for the "All tags" UI choice.
+  var ALL_TAGS_FILTER_VALUE = "__all_tags__";
   var UNTAGGED_FILTER_VALUE = "__untagged__";
   var TAGS_FILTER_ID = "tags";
   var TASK_ROW_CHIP_LIMIT = 3;
@@ -1678,14 +1681,17 @@
           });
       }
 
-      function toggleFilter(id) {
+      function selectedFilterValue() {
+        // A pre-Select host may have persisted a multi-value selection. Keep
+        // its first value visible until the user makes the next single-select
+        // choice; new writes below always contain zero or one value.
+        if (!selected || selected.length === 0) return ALL_TAGS_FILTER_VALUE;
+        return selected[0];
+      }
+
+      function handleFilterSelection(value) {
         if (!capabilities.filterSelectionApi) return;
-        var next =
-          selected.indexOf(id) === -1
-            ? selected.concat([id])
-            : selected.filter(function (v) {
-                return v !== id;
-              });
+        var next = value === ALL_TAGS_FILTER_VALUE ? [] : [value];
         host.taskFilters.setSelection(TAGS_FILTER_ID, next);
         setSelected(next);
       }
@@ -1823,6 +1829,55 @@
             { className: "text-muted-foreground text-xs px-2 py-1.5" },
             capabilities.filterSelectionApi ? "Filter by tag" : "Manage tags",
           ),
+          capabilities.filterSelectionApi
+            ? jsx(
+                "div",
+                { style: { padding: "4px 8px 8px" } },
+                jsx("label", { className: "text-xs", htmlFor: "kandev-tags-filter-select" }, "Tag"),
+                jsx(
+                  ui.Select,
+                  {
+                    value: selectedFilterValue(),
+                    onValueChange: handleFilterSelection,
+                  },
+                  jsx(
+                    ui.SelectTrigger,
+                    {
+                      id: "kandev-tags-filter-select",
+                      "data-testid": "kandev-tags-topbar-select",
+                      className: "mt-1 w-full",
+                      "aria-label": "Filter by tag",
+                    },
+                    jsx(ui.SelectValue, { placeholder: "All tags" }),
+                  ),
+                  jsx(
+                    ui.SelectContent,
+                    null,
+                    jsx(ui.SelectItem, { value: ALL_TAGS_FILTER_VALUE }, "All tags"),
+                    catalog.map(function (tag) {
+                      return jsx(
+                        ui.SelectItem,
+                        { key: tag.id, value: tag.id, "data-testid": "kandev-tags-topbar-select-option" },
+                        jsx("span", { style: { display: "inline-flex", alignItems: "center", gap: "6px" } },
+                          jsx("span", {
+                            "aria-hidden": "true",
+                            style: {
+                              width: "10px",
+                              height: "10px",
+                              borderRadius: "999px",
+                              background: renderableColor(tag.color),
+                              border: "1px solid rgba(0,0,0,0.15)",
+                            },
+                          }),
+                          tag.name,
+                        ),
+                      );
+                    }),
+                    jsx(ui.SelectItem, { value: UNTAGGED_FILTER_VALUE }, "Untagged"),
+                  ),
+                ),
+              )
+            : null,
           jsx(ui.DropdownMenuSeparator, null),
           jsx(
             "div",
@@ -1872,7 +1927,7 @@
 
       /**
        * One `{ display: "grid", ... }` row per catalog tag (swatch,
-       * optional filter checkbox, name pill/rename input, delete button --
+       * name pill/rename input, delete button --
        * see tagRowStyle for the grid's column widths), plus -- inserted
        * directly beneath the one row whose color picker is open, if any --
        * that row's picker box. Built as a flat array (rather than nesting
@@ -1889,7 +1944,6 @@
       }
 
       function tagRowEl(tag) {
-        var isChecked = selected.indexOf(tag.id) !== -1;
         return jsx(
           "div",
           {
@@ -1909,15 +1963,6 @@
               TOPBAR_SWATCH_BUTTON_STYLE_BASE,
             ),
           }),
-          capabilities.filterSelectionApi
-            ? jsx(ui.Checkbox, {
-                "data-testid": "kandev-tags-topbar-checkbox",
-                checked: isChecked,
-                onCheckedChange: function () {
-                  toggleFilter(tag.id);
-                },
-              })
-            : null,
           renamingId === tag.id
             ? jsx(ui.Input, {
                 autoFocus: true,
@@ -2064,9 +2109,8 @@
 
   /**
    * Grid column widths for one Tags-box tag row: a fixed 20px swatch
-   * column, an optional 16px filter-checkbox column (Tier 2 only -- see
-   * detectHostCapabilities' filterSelectionApi), a flexible name-pill
-   * column, and a fixed 24px delete column. `alignItems: "center"` plus
+   * column, a flexible name-pill column, and a fixed 24px delete column.
+   * `alignItems: "center"` plus
    * this fixed sizing is what keeps the delete button's x-offset identical
    * on every row regardless of the tag name's length (the bug this
    * replaces: a bare flex row where a long name pushed the delete button
@@ -2075,7 +2119,7 @@
   function tagRowStyle(capabilities) {
     return {
       display: "grid",
-      gridTemplateColumns: capabilities.filterSelectionApi ? "20px 16px 1fr 24px" : "20px 1fr 24px",
+      gridTemplateColumns: "20px 1fr 24px",
       alignItems: "center",
       gap: "8px",
       padding: "4px 8px",
@@ -2204,6 +2248,150 @@
     });
   }
 
+  // ---------------------------------------------------------------------
+  // registerTaskListFacet (newer hosts only)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Projects this user's private tags into the host's optional, page-local
+   * task-list facet API. The host owns registration generation/lifecycle;
+   * this plugin owns only its storage subscriptions and releases those in
+   * destroy() through addDisposable. Older hosts simply do not have this
+   * registry method, so their existing card chips and board filtering keep
+   * working unchanged.
+   */
+  function registerTagTaskListFacet(registry, host) {
+    if (typeof registry.registerTaskListFacet !== "function") return;
+
+    var catalog = [];
+    var currentWorkspaceId = null;
+    var unsubscribeCatalog = null;
+    var listeners = [];
+
+    function notify() {
+      listeners.slice().forEach(function (listener) {
+        try {
+          listener();
+        } catch (err) {
+          logError("notify task-list tag facet", err);
+        }
+      });
+    }
+
+    function refreshCatalog() {
+      if (!currentWorkspaceId) {
+        catalog = [];
+        notify();
+        return;
+      }
+      host.storage.get(CATALOG_SCOPE, currentWorkspaceId, CATALOG_KEY).then(
+        function (entry) {
+          catalog = sanitizeCatalog(entry ? entry.value : []);
+          notify();
+        },
+        function (err) {
+          // Empty values deliberately give the task list its untagged
+          // fallback while a transient read failure is recovered.
+          catalog = [];
+          logError("load task-list tag facet catalog", err);
+          notify();
+        },
+      );
+    }
+
+    function setWorkspace(workspaceId) {
+      if (workspaceId === currentWorkspaceId) return;
+      currentWorkspaceId = workspaceId || null;
+      clearTaskTagCache();
+      if (unsubscribeCatalog) {
+        unsubscribeCatalog();
+        unsubscribeCatalog = null;
+      }
+      if (currentWorkspaceId) {
+        refreshCatalog();
+        unsubscribeCatalog = host.storage.subscribe(
+          { scope: CATALOG_SCOPE, scopeId: currentWorkspaceId, key: CATALOG_KEY },
+          refreshCatalog,
+        );
+      } else {
+        catalog = [];
+        notify();
+      }
+    }
+
+    setWorkspace(resolveWorkspaceId(host, null));
+    addDisposable(function () {
+      if (unsubscribeCatalog) unsubscribeCatalog();
+      unsubscribeCatalog = null;
+      listeners = [];
+    });
+    addDisposable(
+      host.store.subscribe(function () {
+        setWorkspace(resolveWorkspaceId(host, null));
+      }),
+    );
+    addDisposable(
+      host.storage.subscribe({ scope: TASK_SCOPE, key: TASK_KEY }, function (change) {
+        host.storage.get(TASK_SCOPE, change.scopeId, TASK_KEY).then(
+          function (entry) {
+            setTaskTagCache(change.scopeId, sanitizeTagIdList(entry ? entry.value : []));
+            notify();
+          },
+          function (err) {
+            logError("refresh task-list tag facet task", err);
+            notify();
+          },
+        );
+      }),
+    );
+    // Hydrate values for rows that have not mounted their chip component.
+    // A truncated result is still safe: entries we did receive are useful;
+    // absent entries retain the explicit untagged/loading fallback above.
+    if (typeof host.storage.listByKey === "function") {
+      host.storage.listByKey(TASK_SCOPE, TASK_KEY, { limit: 1000 }).then(
+        function (result) {
+          (result.entries || []).forEach(function (entry) {
+            setTaskTagCache(entry.scopeId, sanitizeTagIdList(entry.value));
+          });
+          notify();
+        },
+        function (err) {
+          logError("prime task-list tag facet", err);
+          notify();
+        },
+      );
+    }
+
+    registry.registerTaskListFacet({
+      id: TAGS_FILTER_ID,
+      label: "Tag",
+      getValues: function (context) {
+        // Never use a prior workspace's catalog when the host provides a
+        // task workspace context. A missing workspace keeps compatibility
+        // with early host drafts and relies on the active-workspace reset.
+        if (context.workspaceId && context.workspaceId !== currentWorkspaceId) return [];
+        var tagIds = getTaskTagCacheEntry(context.taskId);
+        if (!tagIds) return [];
+        return tagIds
+          .map(function (tagId) {
+            var tag = resolveTag(catalog, tagId);
+            return tag ? { value: tag.id, label: tag.name, color: renderableColor(tag.color) } : null;
+          })
+          .filter(function (tag) {
+            return tag !== null;
+          });
+      },
+      subscribe: function (listener) {
+        listeners.push(listener);
+        return function () {
+          listeners = listeners.filter(function (candidate) {
+            return candidate !== listener;
+          });
+        };
+      },
+    });
+  }
+
   window.registerKandevPlugin("kandev-plugin-tags", {
     initialize: function (registry, host) {
       // Idempotent: a disable->enable cycle re-runs initialize() against the
@@ -2247,6 +2435,7 @@
       // workspaces. Registered unconditionally (safe no-op via feature
       // detection on hosts predating registerTaskFilter).
       registerTagFilter(registry, host, capabilities);
+      registerTagTaskListFacet(registry, host);
     },
     // Called by the host's unloadPlugin on disable/uninstall (types.ts's
     // KandevPlugin already supports this -- the plugin simply never
@@ -2297,6 +2486,7 @@
       PALETTE: PALETTE,
       DEFAULT_COLOR: DEFAULT_COLOR,
       UNTAGGED_FILTER_VALUE: UNTAGGED_FILTER_VALUE,
+      ALL_TAGS_FILTER_VALUE: ALL_TAGS_FILTER_VALUE,
       TAGS_FILTER_ID: TAGS_FILTER_ID,
       makeTagChips: makeTagChips,
       makeTagPickerModal: makeTagPickerModal,
@@ -2306,6 +2496,7 @@
       countTasksWithTag: countTasksWithTag,
       cascadeRemoveTagFromTasks: cascadeRemoveTagFromTasks,
       primeTaskTagCache: primeTaskTagCache,
+      registerTagTaskListFacet: registerTagTaskListFacet,
     },
   });
 })();
