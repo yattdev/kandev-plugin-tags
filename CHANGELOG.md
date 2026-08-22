@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.0] - 2026-08-22
+
+### Changed
+
+- docs: explain agent tag MCP workflow (17cea09)
+- feat: share editable tags with agents (a2fcc97)
+- qa: keep tags dropdown above mobile actions (0c120b3)
+- fix: align tags with task row metadata slot (0e8793e)
+- fix: tidy go module dependencies (b6175d4)
+- test: cover truncated agent tag action projection (8b5891e)
+- fix: allow agent tag note truncation (247dd38)
+- qa: fix agent tag action loading (bff6604)
+- feat: add shared agent status tags (afee8c6)
+
+
 ## [0.8.3] - 2026-08-22
 
 ### Changed
