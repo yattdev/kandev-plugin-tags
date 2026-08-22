@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.7.0] - 2026-08-22
+## [0.10.0] - 2026-08-22
 
 ### Added
 
@@ -8,7 +8,43 @@
   **All tags**, one colored tag, or **Untagged**.
 - On hosts with the new task-list facet API, added page-local `/tasks` Tag
   sorting and multi-membership colored grouping while preserving the older
-  host compatibility tiers.
+  host compatibility tiers. The facet resolves tags from the shared
+  workspace catalog (falling back to the legacy private catalog on older
+  hosts), matching the board filter's data source.
+
+## [0.9.0] - 2026-08-22
+
+### Changed
+
+- docs: explain agent tag MCP workflow (17cea09)
+- feat: share editable tags with agents (a2fcc97)
+- qa: keep tags dropdown above mobile actions (0c120b3)
+- fix: align tags with task row metadata slot (0e8793e)
+- fix: tidy go module dependencies (b6175d4)
+- test: cover truncated agent tag action projection (8b5891e)
+- fix: allow agent tag note truncation (247dd38)
+- qa: fix agent tag action loading (bff6604)
+- feat: add shared agent status tags (afee8c6)
+
+
+## [0.8.3] - 2026-08-22
+
+### Changed
+
+- Replace the fixed agent-status vocabulary with a shared, editable workspace
+  tag catalog. Humans manage all shared tags; agents can create, update,
+  delete, and apply agent-origin tags only.
+- Mark agent-applied chips with the existing autopilot robot glyph, a dashed
+  border, and accessible provenance instead of relying on colour alone.
+- Preserve and continue rendering pre-0.8.0 private browser tags as a legacy
+  compatibility layer; they are not silently migrated across users.
+
+## [0.7.0] - 2026-08-19
+
+### Added
+
+- Shared agent status tags for kanban tasks. Agents can add, remove, and list
+  fixed status tags, which render as distinguishable dashed chips in the UI.
 
 ## [0.6.2] - 2026-08-20
 

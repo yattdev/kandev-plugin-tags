@@ -760,6 +760,12 @@
   var catalogStores = {}; // workspaceId -> store
   var taskTagStores = {}; // taskId -> store
   var taskTagWideUnsubscribe = null;
+  // Workspace-shared catalog and task applications. New hosts expose this
+  // through plugin actions; the existing host.storage data remains a
+  // compatibility fallback for an older host or a user's pre-0.8 catalog.
+  var sharedTagStores = {};
+  var sharedTagRefreshTimer = null;
+  var sharedTagActionUnavailableLogged = false;
 
   function makeStore() {
     return {
@@ -873,6 +879,62 @@
       store = taskTagStores[taskId] = makeStore();
     }
     return store;
+  }
+
+  function getSharedTagStore(workspaceId) {
+    var store = sharedTagStores[workspaceId];
+    if (!store) {
+      store = sharedTagStores[workspaceId] = makeStore();
+      store.value = { tags: [], tasks: {} };
+      store.unavailable = false;
+    }
+    return store;
+  }
+
+  function sanitizeSharedTags(raw) {
+    if (!raw || !Array.isArray(raw.tags) || !raw.tasks || typeof raw.tasks !== "object") return { tags: [], tasks: {} };
+    return { tags: sanitizeCatalog(raw.tags), tasks: raw.tasks };
+  }
+
+  function sharedTagsAvailable(host) {
+    return !!(host.api && typeof host.api.invokeAction === "function");
+  }
+
+  function sharedTagsEnabled(host, workspaceId) {
+    return sharedTagsAvailable(host) && !!workspaceId && !getSharedTagStore(workspaceId).unavailable;
+  }
+
+  function fetchSharedTags(host, workspaceId) {
+    var store = getSharedTagStore(workspaceId);
+    if (!host.api || typeof host.api.invokeAction !== "function") {
+      store.unavailable = true; store.value = { tags: [], tasks: {} }; store.loaded = true; store.error = null; notifyStoreListeners(store);
+      return Promise.resolve();
+    }
+    return fetchStore(store, function () {
+      return host.api.invokeAction("shared-tags", { workspaceId: workspaceId }).then(function (payload) {
+        store.unavailable = false;
+        return { value: payload };
+      }).catch(function (err) {
+        store.unavailable = true;
+        if (!sharedTagActionUnavailableLogged) { sharedTagActionUnavailableLogged = true; logError("load shared tags", err); }
+        return { value: { tasks: {} } };
+      });
+    }, sanitizeSharedTags, "shared tags", function () { fetchSharedTags(host, workspaceId); });
+  }
+
+  function ensureSharedTagRefresh(host) {
+    if (sharedTagRefreshTimer) return;
+    if (!window || typeof window.setInterval !== "function" || typeof window.addEventListener !== "function") return;
+    sharedTagRefreshTimer = window.setInterval(function () {
+      Object.keys(sharedTagStores).forEach(function (workspaceId) { fetchSharedTags(host, workspaceId); });
+    }, 30000);
+    function onFocus() { Object.keys(sharedTagStores).forEach(function (workspaceId) { fetchSharedTags(host, workspaceId); }); }
+    window.addEventListener("focus", onFocus);
+    addDisposable(function () { if (typeof window.clearInterval === "function") window.clearInterval(sharedTagRefreshTimer); sharedTagRefreshTimer = null; window.removeEventListener("focus", onFocus); });
+  }
+
+  function useSharedTags(host, workspaceId) {
+    return useSharedStore(host, workspaceId || null, getSharedTagStore, function (currentHost) { ensureSharedTagRefresh(currentHost); }, fetchSharedTags);
   }
 
   /** Creates the ONE wide (cross-task) task-tags subscribe, idempotently. */
@@ -1005,6 +1067,9 @@
     catalogStores = {};
     clearTaskTagCache();
     taskTagWideUnsubscribe = null;
+    sharedTagStores = {};
+    sharedTagRefreshTimer = null;
+    sharedTagActionUnavailableLogged = false;
   }
 
   // ---------------------------------------------------------------------
@@ -1072,10 +1137,14 @@
           key: tag.id,
           "data-testid": "kandev-tags-chip",
           className: "kandev-tags-chip",
-          style: dense ? denseChipStyle(tag.color) : chipStyle(tag.color),
+          style: tag.agent ? Object.assign({}, dense ? denseChipStyle(tag.color) : chipStyle(tag.color), { border: "1px dashed currentColor" }) : (dense ? denseChipStyle(tag.color) : chipStyle(tag.color)),
+          "data-agent": tag.agent ? "true" : undefined,
+          title: tag.agent ? tag.name + " — " + (tag.agentApplied ? "applied by agent" : "created by agent") + (tag.note ? ": " + tag.note : "") : undefined,
+          "aria-label": tag.agent ? tag.name + " — " + (tag.agentApplied ? "applied by agent" : "created by agent") + (tag.note ? ": " + tag.note : "") : undefined,
         },
-        tag.name,
       ];
+      if (tag.agent) spanArgs.push(botIconElement(host));
+      spanArgs.push(tag.name);
       if (removable) {
         spanArgs.push(
           jsx(
@@ -1090,7 +1159,7 @@
               // here also navigates into the task.
               onClick: function (e) {
                 if (e && e.stopPropagation) e.stopPropagation();
-                handleRemove(tag.id);
+                handleRemove(tag);
               },
               onPointerDown: function (e) {
                 if (e && e.stopPropagation) e.stopPropagation();
@@ -1117,12 +1186,20 @@
       var catalogAndLoaded = useCatalog(host, resolvedWorkspaceId, CHIPS_WRITER_ID);
       var catalog = catalogAndLoaded[0];
       var catalogLoaded = catalogAndLoaded[1];
+      var sharedTagsAndLoaded = useSharedTags(host, resolvedWorkspaceId);
+      var sharedTags = sharedTagsAndLoaded[0];
+      var sharedTagsLoaded = sharedTagsAndLoaded[1];
+      var refreshSharedTags = sharedTagsAndLoaded[2];
 
-      if (!resolvedWorkspaceId || !tagIdsLoaded || !catalogLoaded || tagIds.length === 0) return null;
+      if (!resolvedWorkspaceId || !tagIdsLoaded || !catalogLoaded || !sharedTagsLoaded) return null;
 
-      function handleRemove(id) {
+      function handleRemove(tag) {
+        if (tag.shared) {
+          host.api.invokeAction("task-tag-remove", { taskId: taskId, body: { tagId: tag.id } }).then(refreshSharedTags).catch(function (err) { logError("remove shared tag from card", err); });
+          return;
+        }
         readModifyWriteTaskTags(host, taskId, CHIPS_WRITER_ID, function (current) {
-          return removeTaskTagId(current, id);
+          return removeTaskTagId(current, tag.id);
         }).catch(function (err) {
           // Surface the failed removal on the next subscribe/refresh cycle
           // rather than throwing inside a React event handler.
@@ -1140,6 +1217,12 @@
         .filter(function (tag) {
           return tag !== null;
         });
+      var sharedTaskTags = (sharedTags.tasks[taskId] || []).map(function (tag) {
+        return { id: tag.id, name: tag.name, color: tag.color, note: tag.note, agent: tag.agent === true, agentApplied: tag.agentApplied === true, shared: true };
+      });
+      // Legacy private tags stay visible after upgrading. New interactions
+      // below write the shared catalog, which humans and agents both use.
+      resolvedTags = sharedTaskTags.concat(resolvedTags);
       if (resolvedTags.length === 0) return null;
 
       var visibleTags = dense ? resolvedTags.slice(0, TASK_ROW_CHIP_LIMIT) : resolvedTags;
@@ -1191,6 +1274,17 @@
       var catalogLoaded = catalogAndLoaded[1];
       var refreshCatalog = catalogAndLoaded[2];
       var catalogLoadError = catalogAndLoaded[3];
+      var sharedTagsAndLoaded = useSharedTags(host, resolvedWorkspaceId);
+      var sharedTags = sharedTagsAndLoaded[0];
+      var sharedTagsLoaded = sharedTagsAndLoaded[1];
+      var refreshSharedTags = sharedTagsAndLoaded[2];
+      var useShared = sharedTagsEnabled(host, resolvedWorkspaceId);
+      if (useShared) {
+        catalog = sharedTags.tags;
+        catalogLoaded = sharedTagsLoaded;
+        tagIds = (sharedTags.tasks[taskId] || []).map(function (tag) { return tag.id; });
+        tagIdsLoaded = sharedTagsLoaded;
+      }
       var draftState = React.useState("");
       var draft = draftState[0];
       var setDraft = draftState[1];
@@ -1220,6 +1314,13 @@
       function toggleTag(id) {
         setError(null);
         var applying = tagIds.indexOf(id) === -1;
+        if (useShared) {
+          host.api.invokeAction(applying ? "task-tag-add" : "task-tag-remove", { taskId: taskId, body: { tagId: id } }).then(refreshSharedTags).catch(function (err) {
+            logError("toggle shared tag", err);
+            setError(withDetail("Could not update tag. Please try again.", err));
+          });
+          return;
+        }
         var changed = false;
         readModifyWriteTaskTags(host, taskId, PICKER_WRITER_ID, function (current) {
           var next = applying ? addTaskTagId(current, id) : removeTaskTagId(current, id);
@@ -1245,6 +1346,18 @@
       function handleCreateAndApply() {
         if (!canCreate) return;
         setError(null);
+        if (useShared) {
+          host.api.invokeAction("tag-create", { workspaceId: resolvedWorkspaceId, body: { name: draft } }).then(function (payload) {
+            var created = payload.tags.filter(function (tag) { return tag.name.toLowerCase() === name.toLowerCase(); })[0];
+            if (!created) throw new Error("tag not found after create");
+            setDraft("");
+            return host.api.invokeAction("task-tag-add", { taskId: taskId, body: { tagId: created.id } });
+          }).then(refreshSharedTags).catch(function (err) {
+            logError("create shared tag", err);
+            setError(withDetail("Could not create tag. Please try again.", err));
+          });
+          return;
+        }
         var createdTag = null;
         readModifyWriteCatalog(host, resolvedWorkspaceId, PICKER_WRITER_ID, function (currentCatalog) {
           var result = addCatalogTag(currentCatalog, draft, null);
@@ -1389,6 +1502,33 @@
         d: "M7.5 3h5.379a2 2 0 0 1 1.414 .586l6.121 6.121a2.121 2.121 0 0 1 0 3l-6.415 6.415a2.122 2.122 0 0 1 -3 0l-6.121 -6.121a2 2 0 0 1 -.586 -1.414v-5.379a4 4 0 0 1 4 -4z",
       }),
       host.jsx("path", { d: "M17.5 6.5m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" }),
+    );
+  }
+
+  // Same Tabler IconRobot mark and yellow emphasis as the host's autopilot
+  // indicator. It is inlined because the plugin UI contract has no icon
+  // registry, while keeping the familiar bot glyph makes agent provenance
+  // visible without relying on a chip colour or a tooltip.
+  function botIconElement(host) {
+    return host.jsx(
+      "svg",
+      {
+        "data-testid": "kandev-tags-agent-icon",
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        strokeWidth: 2,
+        strokeLinecap: "round",
+        strokeLinejoin: "round",
+        "aria-hidden": "true",
+        style: { width: "12px", height: "12px", marginRight: "3px", verticalAlign: "-2px", color: "#eab308", flexShrink: 0 },
+      },
+      host.jsx("path", { d: "M7 4v-2" }),
+      host.jsx("path", { d: "M17 4v-2" }),
+      host.jsx("rect", { x: "3", y: "5", width: "18", height: "14", rx: "2" }),
+      host.jsx("path", { d: "M8 9h.01" }),
+      host.jsx("path", { d: "M16 9h.01" }),
+      host.jsx("path", { d: "M8 13h8" }),
     );
   }
 
@@ -1609,6 +1749,15 @@
       var loaded = catalogAndLoaded[1];
       var refreshCatalog = catalogAndLoaded[2];
       var loadError = catalogAndLoaded[3];
+      var sharedTagsAndLoaded = useSharedTags(host, resolvedWorkspaceId);
+      var sharedTags = sharedTagsAndLoaded[0];
+      var sharedTagsLoaded = sharedTagsAndLoaded[1];
+      var refreshSharedTags = sharedTagsAndLoaded[2];
+      var useShared = sharedTagsEnabled(host, resolvedWorkspaceId);
+      if (useShared) {
+        catalog = sharedTags.tags;
+        loaded = sharedTagsLoaded;
+      }
 
       // Not a lazy initializer function: the plugin's minimal test React
       // host doesn't invoke function-form useState initializers.
@@ -1657,6 +1806,16 @@
       function handleCreate() {
         if (!canCreate) return;
         setError(null);
+        if (useShared) {
+          host.api.invokeAction("tag-create", { workspaceId: resolvedWorkspaceId, body: { name: draft } }).then(function () {
+            setDraft("");
+            refreshSharedTags();
+          }).catch(function (err) {
+            logError("create shared tag", err);
+            setError(withDetail("Could not create tag. Please try again.", err));
+          });
+          return;
+        }
         var createdTag = null;
         readModifyWriteCatalog(host, resolvedWorkspaceId, MANAGER_WRITER_ID, function (current) {
           var result = addCatalogTag(current, draft, null);
@@ -1704,6 +1863,17 @@
           return;
         }
         var changed = false;
+        if (useShared) {
+          host.api.invokeAction("tag-update", { workspaceId: resolvedWorkspaceId, body: { id: id, name: nextName } }).then(function () {
+            setRenamingId(null);
+            refreshSharedTags();
+          }).catch(function (err) {
+            logError("rename shared tag", err);
+            setRenamingId(null);
+            setError(withDetail("Could not rename tag. Please try again.", err));
+          });
+          return;
+        }
         readModifyWriteCatalog(host, resolvedWorkspaceId, MANAGER_WRITER_ID, function (current) {
           var next = updateCatalogTag(current, id, { name: nextName });
           changed = next !== current;
@@ -1726,6 +1896,13 @@
 
       function handleRecolor(id, nextColor) {
         setError(null);
+        if (useShared) {
+          host.api.invokeAction("tag-update", { workspaceId: resolvedWorkspaceId, body: { id: id, color: nextColor } }).then(refreshSharedTags).catch(function (err) {
+            logError("recolor shared tag", err);
+            setError(withDetail("Could not recolor tag. Please try again.", err));
+          });
+          return;
+        }
         readModifyWriteCatalog(host, resolvedWorkspaceId, MANAGER_WRITER_ID, function (current) {
           return updateCatalogTag(current, id, { color: nextColor });
         })
@@ -1776,6 +1953,13 @@
       }
 
       function openDeleteConfirm(tag) {
+        if (useShared) {
+          host.api.invokeAction("tag-delete", { workspaceId: resolvedWorkspaceId, body: { id: tag.id } }).then(refreshSharedTags).catch(function (err) {
+            logError("delete shared tag", err);
+            setError(withDetail("Could not delete tag. Please try again.", err));
+          });
+          return;
+        }
         var modal = host.openModal({
           title: "Delete tag",
           size: "sm",
@@ -1978,20 +2162,7 @@
                   if (e.key === "Escape") setRenamingId(null);
                 },
               })
-            : jsx(
-                "span",
-                {
-                  style: Object.assign(
-                    { minWidth: 0, cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis" },
-                    chipStyle(tag.color),
-                  ),
-                  "data-testid": "kandev-tags-topbar-pill",
-                  onClick: function () {
-                    setRenamingId(tag.id);
-                  },
-                },
-                tag.name,
-              ),
+            : tagPillEl(tag),
           jsx(
             "button",
             {
@@ -2007,6 +2178,23 @@
             "×",
           ),
         );
+      }
+
+      function tagPillEl(tag) {
+        var args = [
+          "span",
+          {
+            style: Object.assign(
+              { minWidth: 0, cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis" },
+              chipStyle(tag.color),
+            ),
+            "data-testid": "kandev-tags-topbar-pill",
+            onClick: function () { setRenamingId(tag.id); },
+          },
+        ];
+        if (tag.owner === "agent") args.push(botIconElement(host));
+        args.push(tag.name);
+        return jsx.apply(null, args);
       }
 
       /**
@@ -2142,6 +2330,31 @@
         catalog = [];
         return;
       }
+      // The action response is the canonical shared catalog. Prime the same
+      // cache used by matches() so filtering works for agent and human chips,
+      // including cards that have not mounted a chip component yet.
+      if (sharedTagsAvailable(host)) {
+        host.api.invokeAction("shared-tags", { workspaceId: currentWorkspaceId }).then(
+          function (payload) {
+            catalog = sanitizeCatalog(payload && payload.tags);
+            clearTaskTagCache();
+            Object.keys((payload && payload.tasks) || {}).forEach(function (taskId) {
+              setTaskTagCache(taskId, ((payload.tasks[taskId] || []).map(function (tag) { return tag.id; })));
+            });
+          },
+          function (err) {
+            // A pre-actions host still has the old private implementation;
+            // retain it as a transparent fallback rather than breaking the
+            // board filter because the new endpoint is unavailable.
+            loadPrivateCatalog(err);
+          },
+        );
+        return;
+      }
+      loadPrivateCatalog();
+    }
+
+    function loadPrivateCatalog(actionErr) {
       host.storage.get(CATALOG_SCOPE, currentWorkspaceId, CATALOG_KEY).then(
         function (entry) {
           catalog = sanitizeCatalog(entry ? entry.value : []);
@@ -2149,7 +2362,7 @@
         function (err) {
           // Previously unhandled (D3) -- an unhandled rejection fired on
           // every workspace switch that hit a storage error.
-          logError("load tag filter catalog", err);
+          logError("load tag filter catalog", actionErr || err);
         },
       );
     }
@@ -2284,6 +2497,32 @@
         notify();
         return;
       }
+      // Mirrors registerTagFilter's refreshCatalog: the shared-tags action
+      // response is the canonical catalog on hosts that support it, so the
+      // facet's Sort/Group options resolve current workspace-shared tag
+      // names/colors instead of a stale, near-empty legacy private catalog.
+      if (sharedTagsAvailable(host)) {
+        host.api.invokeAction("shared-tags", { workspaceId: currentWorkspaceId }).then(
+          function (payload) {
+            catalog = sanitizeCatalog(payload && payload.tags);
+            clearTaskTagCache();
+            Object.keys((payload && payload.tasks) || {}).forEach(function (taskId) {
+              setTaskTagCache(taskId, ((payload.tasks[taskId] || []).map(function (tag) { return tag.id; })));
+            });
+            notify();
+          },
+          function (err) {
+            // A pre-actions host still has the old private implementation;
+            // retain it as a transparent fallback.
+            loadPrivateCatalog(err);
+          },
+        );
+        return;
+      }
+      loadPrivateCatalog();
+    }
+
+    function loadPrivateCatalog(actionErr) {
       host.storage.get(CATALOG_SCOPE, currentWorkspaceId, CATALOG_KEY).then(
         function (entry) {
           catalog = sanitizeCatalog(entry ? entry.value : []);
@@ -2293,7 +2532,7 @@
           // Empty values deliberately give the task list its untagged
           // fallback while a transient read failure is recovered.
           catalog = [];
-          logError("load task-list tag facet catalog", err);
+          logError("load task-list tag facet catalog", actionErr || err);
           notify();
         },
       );

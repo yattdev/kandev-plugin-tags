@@ -1,13 +1,11 @@
-// Package main tests. tagsPlugin is a deliberate no-op backend (see
-// plugin.go) -- this test only asserts it satisfies pluginsdk.Plugin and
-// that its inherited UnimplementedPlugin defaults behave as documented
-// (nil Host is safe, OnEvent is a no-op, HandleWebhook answers 404 since no
-// webhook is declared). There is no tag logic to test here; that lives in
-// ui/bundle.js and ui/bundle.test.js.
+// Package main tests tagsPlugin's baseline SDK wiring and provides a fake
+// Host for the agent-tag tests.
 package main
 
 import (
 	"context"
+	"encoding/json"
+	"sync"
 	"testing"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
@@ -16,6 +14,8 @@ import (
 
 func TestTagsPlugin_SatisfiesPluginInterface(t *testing.T) {
 	var _ pluginsdk.Plugin = (*tagsPlugin)(nil)
+	var _ pluginsdk.AgentToolPlugin = (*tagsPlugin)(nil)
+	var _ pluginsdk.ActionHandler = (*tagsPlugin)(nil)
 }
 
 func TestTagsPlugin_OnEvent_NoHost_ReturnsNilWithoutPanicking(t *testing.T) {
@@ -40,19 +40,56 @@ func TestTagsPlugin_HostRoundTrip(t *testing.T) {
 	require.Same(t, pluginsdk.Host(host), p.Host())
 }
 
-// fakeHost is a minimal pluginsdk.Host stand-in for the SetHost/Host
-// round-trip test above; tagsPlugin never calls any Host method itself.
+// fakeHost is an in-memory pluginsdk.Host stand-in for backend tests.
 type fakeHost struct {
 	pluginsdk.UnimplementedHostData
+	mu    sync.Mutex
+	state map[string]map[string]any
 }
 
-func (h *fakeHost) GetState(context.Context, string, string, string) (map[string]any, bool, error) {
-	return nil, false, nil
+func stateKey(scope, scopeID, key string) string {
+	return scope + "\x00" + scopeID + "\x00" + key
 }
-func (h *fakeHost) SetState(context.Context, string, string, string, map[string]any) error {
+
+func cloneMap(value map[string]any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	b, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil {
+		panic(err)
+	}
+	return out
+}
+
+func (h *fakeHost) GetState(_ context.Context, scope, scopeID, key string) (map[string]any, bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.state == nil {
+		return nil, false, nil
+	}
+	value, ok := h.state[stateKey(scope, scopeID, key)]
+	return cloneMap(value), ok, nil
+}
+func (h *fakeHost) SetState(_ context.Context, scope, scopeID, key string, value map[string]any) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.state == nil {
+		h.state = map[string]map[string]any{}
+	}
+	h.state[stateKey(scope, scopeID, key)] = cloneMap(value)
 	return nil
 }
-func (h *fakeHost) DeleteState(context.Context, string, string, string) error { return nil }
+func (h *fakeHost) DeleteState(_ context.Context, scope, scopeID, key string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.state, stateKey(scope, scopeID, key))
+	return nil
+}
 func (h *fakeHost) ListState(context.Context, string, string) ([]pluginsdk.StateEntry, error) {
 	return nil, nil
 }
