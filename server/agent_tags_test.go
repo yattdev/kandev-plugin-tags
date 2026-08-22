@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/kandev/kandev/pkg/pluginsdk"
 	"github.com/stretchr/testify/require"
@@ -21,216 +19,149 @@ func newAgentTagTestPlugin() (*tagsPlugin, *fakeHost) {
 }
 
 func agentToolReq(name string, args map[string]any) *pluginsdk.AgentToolRequest {
-	return &pluginsdk.AgentToolRequest{
-		Name:      name,
-		Arguments: args,
-		Context: pluginsdk.AgentToolContext{
-			TaskID:      "task-1",
-			SessionID:   "session-1",
-			WorkspaceID: "ws-1",
-			Surface:     "kanban-task",
-		},
-	}
+	return &pluginsdk.AgentToolRequest{Name: name, Arguments: args, Context: pluginsdk.AgentToolContext{TaskID: "task-1", SessionID: "session-1", WorkspaceID: "ws-1", Surface: "kanban-task"}}
 }
-
-func resultTags(t *testing.T, result *pluginsdk.AgentToolResult) []string {
+func storedTagDoc(t *testing.T, host *fakeHost, workspaceID string) tagDoc {
 	t.Helper()
-	raw, ok := result.StructuredContent["tags"].([]any)
-	require.True(t, ok, "StructuredContent.tags should be an array")
-	out := make([]string, len(raw))
-	for i, tag := range raw {
-		out[i], ok = tag.(string)
-		require.True(t, ok, "tag %d should be a string", i)
-	}
-	return out
-}
-
-func storedAgentDoc(t *testing.T, host *fakeHost, workspaceID string) agentTagDoc {
-	t.Helper()
-	raw, found, err := host.GetState(context.Background(), "workspace", workspaceID, agentTagsStateKey)
+	raw, found, err := host.GetState(context.Background(), "workspace", workspaceID, tagStateKey)
 	require.NoError(t, err)
 	require.True(t, found)
-	doc, err := decodeAgentTagDoc(raw)
+	doc, err := decodeTagDoc(raw)
 	require.NoError(t, err)
 	return doc
 }
-
-func storedAgentRawJSON(t *testing.T, host *fakeHost, workspaceID string) string {
+func agentCreate(t *testing.T, p *tagsPlugin, name string) string {
 	t.Helper()
-	raw, _, err := host.GetState(context.Background(), "workspace", workspaceID, agentTagsStateKey)
+	result, err := p.InvokeAgentTool(context.Background(), agentToolReq("create_tag", map[string]any{"name": name, "color": "#2563eb"}))
 	require.NoError(t, err)
-	b, err := json.Marshal(raw)
-	require.NoError(t, err)
-	return string(b)
+	require.False(t, result.IsError, result.Text)
+	catalog := result.StructuredContent["catalog"].([]any)
+	for _, raw := range catalog {
+		tag := raw.(map[string]any)
+		if tag["name"] == name {
+			return tag["id"].(string)
+		}
+	}
+	t.Fatal("created tag missing from tool result")
+	return ""
 }
 
-func TestInvokeAgentToolAddTagStoresAndReturnsStructuredTags(t *testing.T) {
+func TestAgentCanCreateApplyEditAndDeleteOwnSharedTag(t *testing.T) {
 	p, host := newAgentTagTestPlugin()
+	id := agentCreate(t, p, "Waiting on API")
 
-	result, err := p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{"tag": "blocked"}))
+	result, err := p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{"tag_id": id, "note": "credentials requested"}))
 	require.NoError(t, err)
 	require.False(t, result.IsError)
-	require.NotEmpty(t, result.Text)
-	require.Equal(t, []string{"blocked"}, resultTags(t, result))
+	doc := storedTagDoc(t, host, "ws-1")
+	require.Equal(t, ownerAgent, doc.Tags[0].Owner)
+	require.Equal(t, true, doc.Tasks["task-1"][0].Agent)
+	require.Equal(t, "credentials requested", doc.Tasks["task-1"][0].Note)
 
-	doc := storedAgentDoc(t, host, "ws-1")
-	require.Len(t, doc.Tasks["task-1"], 1)
-	entry := doc.Tasks["task-1"][0]
-	require.Equal(t, "blocked", entry.Tag)
-	require.Equal(t, "", entry.Note)
-	require.Equal(t, "session-1", entry.SessionID)
-	require.NotEmpty(t, entry.UpdatedAt)
+	result, err = p.InvokeAgentTool(context.Background(), agentToolReq("update_tag", map[string]any{"tag_id": id, "name": "Waiting for API", "color": "#f59e0b"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	doc = storedTagDoc(t, host, "ws-1")
+	require.Equal(t, "Waiting for API", doc.Tags[0].Name)
+	require.Equal(t, "#f59e0b", doc.Tags[0].Color)
+
+	result, err = p.InvokeAgentTool(context.Background(), agentToolReq("delete_tag", map[string]any{"tag_id": id}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	doc = storedTagDoc(t, host, "ws-1")
+	require.Empty(t, doc.Tags)
+	require.Empty(t, doc.Tasks)
 }
 
-func TestInvokeAgentToolRejectsInvalidTagWithoutMutation(t *testing.T) {
+func TestAgentCannotManageHumanOwnedTagAndHumanApplicationSurvivesAgentRemoval(t *testing.T) {
 	p, host := newAgentTagTestPlugin()
-	_, err := p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{"tag": "blocked"}))
+	_, err := p.HandleAction(context.Background(), actionReq("tag-create", []byte(`{"name":"Human priority","color":"#ef4444"}`)))
 	require.NoError(t, err)
-	before := storedAgentRawJSON(t, host, "ws-1")
+	doc := storedTagDoc(t, host, "ws-1")
+	humanID := doc.Tags[0].ID
 
-	result, err := p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{"tag": "nonsense"}))
+	result, err := p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{"tag_id": humanID}))
 	require.NoError(t, err)
 	require.True(t, result.IsError)
-	for _, valid := range []string{"blocked", "needs-input", "needs-review", "failed", "obsolete", "abandoned"} {
-		require.Contains(t, result.Text, valid)
-	}
-	require.Equal(t, before, storedAgentRawJSON(t, host, "ws-1"))
+	require.Contains(t, result.Text, "agent-created")
+
+	agentID := agentCreate(t, p, "Agent marker")
+	_, err = p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{"tag_id": agentID}))
+	require.NoError(t, err)
+	_, err = p.HandleAction(context.Background(), actionReq("task-tag-add", []byte(`{"tagId":"`+agentID+`"}`)))
+	require.NoError(t, err)
+	_, err = p.InvokeAgentTool(context.Background(), agentToolReq("remove_tag", map[string]any{"tag_id": agentID}))
+	require.NoError(t, err)
+	doc = storedTagDoc(t, host, "ws-1")
+	entry := doc.Tasks["task-1"][0]
+	require.False(t, entry.Agent)
+	require.True(t, entry.Human)
 }
 
-func TestInvokeAgentToolAddTagIsIdempotentAndUpdatesNote(t *testing.T) {
+func TestAgentToolTruncatesNoteAndValidatesContext(t *testing.T) {
 	p, host := newAgentTagTestPlugin()
-
-	_, err := p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{"tag": "blocked", "note": "first"}))
-	require.NoError(t, err)
-	first := storedAgentDoc(t, host, "ws-1").Tasks["task-1"][0]
-	time.Sleep(time.Millisecond)
-
-	result, err := p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{"tag": "blocked", "note": "second"}))
+	id := agentCreate(t, p, "Long note")
+	long := strings.Repeat("界", 205)
+	result, err := p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{"tag_id": id, "note": long}))
 	require.NoError(t, err)
 	require.False(t, result.IsError)
-	require.Equal(t, []string{"blocked"}, resultTags(t, result))
+	require.Len(t, []rune(storedTagDoc(t, host, "ws-1").Tasks["task-1"][0].Note), maxTagNoteRunes)
 
-	entries := storedAgentDoc(t, host, "ws-1").Tasks["task-1"]
-	require.Len(t, entries, 1)
-	require.Equal(t, "second", entries[0].Note)
-	require.Greater(t, entries[0].UpdatedAt, first.UpdatedAt)
+	req := agentToolReq("list_tags", nil)
+	req.Context.WorkspaceID = ""
+	result, err = p.InvokeAgentTool(context.Background(), req)
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Contains(t, result.Text, "workspace_id")
 }
 
-func TestInvokeAgentToolRemoveTagIsIdempotentAndDeletesEmptyTask(t *testing.T) {
+func TestLegacyAgentStatusDocumentMigratesOnNextWrite(t *testing.T) {
 	p, host := newAgentTagTestPlugin()
-	result, err := p.InvokeAgentTool(context.Background(), agentToolReq("remove_tag", map[string]any{"tag": "blocked"}))
-	require.NoError(t, err)
-	require.False(t, result.IsError)
-	require.Equal(t, []string{}, resultTags(t, result))
-
-	_, err = p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{"tag": "blocked"}))
-	require.NoError(t, err)
-	result, err = p.InvokeAgentTool(context.Background(), agentToolReq("remove_tag", map[string]any{"tag": "blocked"}))
-	require.NoError(t, err)
-	require.False(t, result.IsError)
-	require.Equal(t, []string{}, resultTags(t, result))
-	require.NotContains(t, storedAgentDoc(t, host, "ws-1").Tasks, "task-1")
-}
-
-func TestInvokeAgentToolListTagsSortsAndDoesNotMutate(t *testing.T) {
-	p, host := newAgentTagTestPlugin()
-	doc := newAgentTagDoc()
-	doc.Tasks["task-1"] = []tagEntry{
-		{Tag: "failed", UpdatedAt: "2026-08-19T00:00:02Z"},
-		{Tag: "blocked", UpdatedAt: "2026-08-19T00:00:01Z"},
-	}
-	raw, err := encodeAgentTagDoc(doc)
-	require.NoError(t, err)
-	require.NoError(t, host.SetState(context.Background(), "workspace", "ws-1", agentTagsStateKey, raw))
-	before := storedAgentRawJSON(t, host, "ws-1")
-
+	legacy := map[string]any{"version": 1, "tasks": map[string]any{"task-1": []any{map[string]any{"tag": "blocked", "note": "waiting", "updated_at": "2026-01-01T00:00:00Z"}}}}
+	require.NoError(t, host.SetState(context.Background(), "workspace", "ws-1", tagStateKey, legacy))
 	result, err := p.InvokeAgentTool(context.Background(), agentToolReq("list_tags", nil))
 	require.NoError(t, err)
 	require.False(t, result.IsError)
-	require.Equal(t, []string{"blocked", "failed"}, resultTags(t, result))
-	require.Equal(t, before, storedAgentRawJSON(t, host, "ws-1"))
-}
-
-func TestInvokeAgentToolRequiresTaskAndWorkspaceContextWithoutMutation(t *testing.T) {
-	p, host := newAgentTagTestPlugin()
-	for name, mutate := range map[string]func(*pluginsdk.AgentToolRequest){
-		"task_id":      func(req *pluginsdk.AgentToolRequest) { req.Context.TaskID = "" },
-		"workspace_id": func(req *pluginsdk.AgentToolRequest) { req.Context.WorkspaceID = "" },
-	} {
-		t.Run(name, func(t *testing.T) {
-			req := agentToolReq("add_tag", map[string]any{"tag": "blocked"})
-			mutate(req)
-			result, err := p.InvokeAgentTool(context.Background(), req)
-			require.NoError(t, err)
-			require.True(t, result.IsError)
-			require.Contains(t, result.Text, name)
-		})
-	}
-	require.Nil(t, host.state, "missing context must not create stored state")
-}
-
-func TestInvokeAgentToolTruncatesLongNoteByRune(t *testing.T) {
-	p, host := newAgentTagTestPlugin()
-	longNote := ""
-	for i := 0; i < 205; i++ {
-		longNote += "界"
-	}
-
-	result, err := p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{"tag": "blocked", "note": longNote}))
+	require.Equal(t, "Blocked", result.StructuredContent["tags"].([]any)[0].(map[string]any)["name"])
+	_, err = p.InvokeAgentTool(context.Background(), agentToolReq("create_tag", map[string]any{"name": "new"}))
 	require.NoError(t, err)
-	require.False(t, result.IsError)
-	note := storedAgentDoc(t, host, "ws-1").Tasks["task-1"][0].Note
-	require.Len(t, []rune(note), 200)
+	doc := storedTagDoc(t, host, "ws-1")
+	require.Equal(t, 2, doc.Version)
+	require.Len(t, doc.Tags, 2)
 }
 
-func TestMutateWorkspaceDocCapsTasksByEvictingOldestUpdatedAt(t *testing.T) {
+func TestMutationsAreSerializedAndCapTaskDocuments(t *testing.T) {
 	p, host := newAgentTagTestPlugin()
-	doc := newAgentTagDoc()
-	for i := 0; i < agentTagTaskCap; i++ {
-		taskID := fmt.Sprintf("task-%03d", i)
-		doc.Tasks[taskID] = []tagEntry{{Tag: "blocked", UpdatedAt: fmt.Sprintf("2026-08-19T00:00:%02dZ", i)}}
-	}
-	raw, err := encodeAgentTagDoc(doc)
-	require.NoError(t, err)
-	require.NoError(t, host.SetState(context.Background(), "workspace", "ws-1", agentTagsStateKey, raw))
-
-	req := agentToolReq("add_tag", map[string]any{"tag": "blocked"})
-	req.Context.TaskID = "task-new"
-	result, err := p.InvokeAgentTool(context.Background(), req)
-	require.NoError(t, err)
-	require.False(t, result.IsError)
-
-	stored := storedAgentDoc(t, host, "ws-1")
-	require.Len(t, stored.Tasks, agentTagTaskCap)
-	require.NotContains(t, stored.Tasks, "task-000")
-	require.Contains(t, stored.Tasks, "task-new")
-}
-
-func TestInvokeAgentToolConcurrentDistinctTasksDoNotLoseUpdates(t *testing.T) {
-	p, host := newAgentTagTestPlugin()
+	id := agentCreate(t, p, "Concurrent")
 	var wg sync.WaitGroup
-	errs := make(chan error, 50)
 	for i := 0; i < 50; i++ {
-		i := i
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			req := agentToolReq("add_tag", map[string]any{"tag": "blocked"})
+			req := agentToolReq("add_tag", map[string]any{"tag_id": id})
 			req.Context.TaskID = fmt.Sprintf("task-%02d", i)
-			result, err := p.InvokeAgentTool(context.Background(), req)
-			if err != nil {
-				errs <- err
-				return
-			}
-			if result.IsError {
-				errs <- errors.New(result.Text)
-			}
-		}()
+			_, err := p.InvokeAgentTool(context.Background(), req)
+			require.NoError(t, err)
+		}(i)
 	}
 	wg.Wait()
-	close(errs)
-	for err := range errs {
-		require.NoError(t, err)
+	require.Len(t, storedTagDoc(t, host, "ws-1").Tasks, 50)
+
+	doc := newTagDoc()
+	doc.Tags = []sharedTag{{ID: id, Name: "Concurrent", Color: defaultTagColor, Owner: ownerAgent}}
+	for i := 0; i < tagTaskCap; i++ {
+		doc.Tasks[fmt.Sprintf("old-%03d", i)] = []taskTag{{TagID: id, Agent: true, UpdatedAt: fmt.Sprintf("2026-01-01T00:00:%02dZ", i)}}
 	}
-	require.Len(t, storedAgentDoc(t, host, "ws-1").Tasks, 50)
+	raw, err := encodeTagDoc(doc)
+	require.NoError(t, err)
+	require.NoError(t, host.SetState(context.Background(), "workspace", "ws-cap", tagStateKey, raw))
+	req := agentToolReq("add_tag", map[string]any{"tag_id": id})
+	req.Context.WorkspaceID = "ws-cap"
+	req.Context.TaskID = "new"
+	_, err = p.InvokeAgentTool(context.Background(), req)
+	require.NoError(t, err)
+	capDoc := storedTagDoc(t, host, "ws-cap")
+	require.Len(t, capDoc.Tasks, tagTaskCap)
+	require.NotContains(t, capDoc.Tasks, "old-000")
+	require.Contains(t, capDoc.Tasks, "new")
 }

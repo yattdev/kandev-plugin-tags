@@ -1028,15 +1028,18 @@ test("agent status tags render before user tags on card chips from direct invoke
   };
   fakeHost.api = {
     invokeAction(key, input) {
-      assert.equal(key, "agent-tags");
+      assert.equal(key, "shared-tags");
       assertStructural.deepEqual(input, { workspaceId: "ws-1" });
       return Promise.resolve({
+        tags: [],
         tasks: {
           "task-1": [
             {
-              tag: "blocked",
-              label: "Blocked",
+              id: "blocked",
+              name: "Blocked",
               color: "#dc2626",
+              agent: true,
+              agentApplied: true,
               note: "waiting on API keys",
               updatedAt: "2026-08-19T00:00:00Z",
             },
@@ -1052,7 +1055,8 @@ test("agent status tags render before user tags on card chips from direct invoke
   await flush();
 
   const chips = getTree().children[0];
-  assert.equal(chips[0].children[0], "Blocked", "agent chip is rendered before user chips");
+  assert.equal(chips[0].children[1], "Blocked", "agent chip is rendered before user chips");
+  assert.equal(chips[0].children[0].props["data-testid"], "kandev-tags-agent-icon");
   assert.equal(chips[0].props["data-agent"], "true");
   assert.equal(chips[0].props.style.border, "1px dashed currentColor");
   assert.equal(chips[0].props.title, "Blocked — applied by agent: waiting on API keys");
@@ -1081,10 +1085,11 @@ test("agent status tags render on dense task rows without a remove control and c
   fakeHost.api = {
     invokeAction() {
       return Promise.resolve({
+        tags: [],
         tasks: {
           "task-1": [
-            { tag: "blocked", label: "Blocked", color: "#dc2626", note: "", updatedAt: "t1" },
-            { tag: "needs-input", label: "Needs input", color: "#f59e0b", note: "", updatedAt: "t2" },
+            { id: "blocked", name: "Blocked", color: "#dc2626", agent: true, agentApplied: true, note: "", updatedAt: "t1" },
+            { id: "needs-input", name: "Needs input", color: "#f59e0b", agent: true, agentApplied: true, note: "", updatedAt: "t2" },
           ],
         },
       });
@@ -1099,8 +1104,8 @@ test("agent status tags render on dense task rows without a remove control and c
   const row = getTree();
   const chips = row.children[0];
   assert.equal(chips.length, 3, "dense rows still cap at three total chips");
-  assertStructural.deepEqual(chips.map((chip) => chip.children[0]), ["Blocked", "Needs input", "urgent"]);
-  assert.equal(chips[0].children.length, 1, "dense agent chip has no remove button");
+  assertStructural.deepEqual(chips.map((chip) => (chip.props["data-agent"] ? chip.children[1] : chip.children[0])), ["Blocked", "Needs input", "urgent"]);
+  assert.equal(chips[0].children.length, 2, "dense agent chip has a bot marker but no remove button");
   assert.equal(row.children[1].children[0], "+1", "hidden user tag is counted in +N");
 });
 
@@ -1121,14 +1126,15 @@ test("agent status chip removal invokes the task action and refreshes the shared
   fakeHost.api = {
     invokeAction(key, input) {
       calls.push({ key, input });
-      if (key === "agent-tag-remove") {
+      if (key === "task-tag-remove") {
         removed = true;
         return Promise.resolve({ tags: [] });
       }
       return Promise.resolve({
+        tags: [],
         tasks: removed
           ? {}
-          : { "task-1": [{ tag: "blocked", label: "Blocked", color: "#dc2626", note: "", updatedAt: "t1" }] },
+          : { "task-1": [{ id: "blocked", name: "Blocked", color: "#dc2626", agent: true, agentApplied: true, note: "", updatedAt: "t1" }] },
       });
     },
   };
@@ -1137,15 +1143,15 @@ test("agent status chip removal invokes the task action and refreshes the shared
     slotProps: { taskId: "task-1", workspaceId: "ws-1" },
   });
   await flush();
-  getTree().children[0][0].children[1].props.onClick({ stopPropagation() {} });
+  getTree().children[0][0].children[2].props.onClick({ stopPropagation() {} });
   await flush();
 
-  assert.equal(calls[0].key, "agent-tags", "initial load reads workspace agent tags");
+  assert.equal(calls[0].key, "shared-tags", "initial load reads the shared workspace catalog");
   assertStructural.deepEqual(calls[1], {
-    key: "agent-tag-remove",
-    input: { taskId: "task-1", body: { tag: "blocked" } },
+    key: "task-tag-remove",
+    input: { taskId: "task-1", body: { tagId: "blocked" } },
   });
-  assert.equal(calls[2].key, "agent-tags", "successful removal refreshes the workspace agent-tag store");
+  assert.equal(calls[2].key, "shared-tags", "successful removal refreshes the shared workspace store");
   assert.equal(getTree(), null, "the chip row disappears after the refreshed store no longer has tags");
 });
 
@@ -1181,7 +1187,7 @@ test("agent tag action absence or rejection degrades to user tags without throwi
 
   assert.equal(rejectingTree().children[0][0].children[0], "urgent");
   assert.equal(calls.error.length, 1, "a rejecting action is logged once");
-  assert.match(String(calls.error[0][0]), /load agent tags/);
+  assert.match(String(calls.error[0][0]), /load shared tags/);
 });
 
 test("agent tag refresh interval is cleared on re-entrant initialize and destroy", async () => {

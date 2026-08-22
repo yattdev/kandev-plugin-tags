@@ -6,8 +6,9 @@ import (
 	"github.com/kandev/kandev/pkg/pluginsdk"
 )
 
-// tagsPlugin serves the workspace-shared agent status-tag layer. User-created
-// tags remain private and are still handled by the browser through host.storage.
+// tagsPlugin serves the workspace-shared tag catalog through Host state and
+// authorized plugin actions. Legacy private browser tags remain a read-only
+// compatibility layer in the UI.
 type tagsPlugin struct {
 	pluginsdk.UnimplementedPlugin
 	stateMu sync.Mutex

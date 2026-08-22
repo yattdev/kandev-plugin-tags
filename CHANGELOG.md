@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.3] - 2026-08-22
+
+### Changed
+
+- Replace the fixed agent-status vocabulary with a shared, editable workspace
+  tag catalog. Humans manage all shared tags; agents can create, update,
+  delete, and apply agent-origin tags only.
+- Mark agent-applied chips with the existing autopilot robot glyph, a dashed
+  border, and accessible provenance instead of relying on colour alone.
+- Preserve and continue rendering pre-0.8.0 private browser tags as a legacy
+  compatibility layer; they are not silently migrated across users.
+
 ## [0.7.0] - 2026-08-19
 
 ### Added
