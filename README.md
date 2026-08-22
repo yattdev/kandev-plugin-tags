@@ -32,6 +32,52 @@ the host intentionally does not expose another user's private storage to the
 plugin backend; create a shared tag when you want agents and teammates to use
 it.
 
+### Agent MCP workflow
+
+The tools are exposed only while an agent is running on a kanban task. Kandev
+binds the invocation to that task and workspace, so the agent must never pass
+or invent a task or workspace id.
+
+| Tool | Purpose | Required input |
+| --- | --- | --- |
+| `create_tag` | Create an agent-owned shared definition. | `name`; optional hex `color` |
+| `list_tags` | Read the shared catalog and current task applications. | none |
+| `update_tag` | Rename and/or recolor an agent-owned definition. | `tag_id`, plus `name` and/or `color` |
+| `add_tag` | Apply an agent-owned tag to the current task. | `tag_id`; optional `note` |
+| `remove_tag` | Remove the agent application from the current task. | `tag_id` |
+| `delete_tag` | Delete an agent-owned definition and every application of it. | `tag_id` |
+
+`create_tag` and `list_tags` return `structuredContent.catalog`; copy the
+returned tag `id` into later calls. `add_tag` updates the existing agent
+application rather than duplicating it, and truncates notes to 200 characters.
+`remove_tag` is safe to retry. `delete_tag` is intentionally destructive: it
+removes the definition from all workspace tasks, so prefer `remove_tag` when a
+task has merely become unblocked or complete.
+
+Example instruction to give an agent:
+
+```text
+Use the Tags plugin MCP tools for this task.
+
+1. Call create_tag with {"name":"Waiting on design","color":"#f59e0b"}.
+2. Copy the returned catalog entry's id.
+3. Call add_tag with that tag_id and note "Need final empty-state copy".
+4. Call list_tags and confirm the tag is applied to this task.
+5. When the copy arrives, call update_tag with the same tag_id, name
+   "Ready for implementation", and color "#2563eb".
+
+Leave the tag applied so a person can see the robot-marked chip. Do not delete
+the definition unless it is no longer useful anywhere in the workspace.
+```
+
+For cleanup after a task-specific tag is no longer needed:
+
+```text
+Call remove_tag with the tag_id, then call list_tags to confirm it is gone from
+this task. Call delete_tag only if the agent-created definition should also be
+removed from every other task in this workspace.
+```
+
 - **On every card**: tags you've added render as a row of small colored
   chips below the card's other badges. No tags, no row -- the row only
   appears once you've added at least one.
