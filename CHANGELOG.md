@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.11.0] - 2026-08-22
+
+### Changed
+
+- review: notes for PR/MR description (72355d8)
+- review: make the task-list tag facet react to shared tag changes (ce103e7)
+- feat: add single-select tag filtering and task-list facet (be6c532)
+
+
 ## [0.10.0] - 2026-08-22
 
 ### Added
