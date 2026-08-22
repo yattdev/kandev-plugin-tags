@@ -32,7 +32,10 @@ func TestManifestDeclaresSharedCatalogContract(t *testing.T) {
 	require.NoError(t, err)
 	var manifest testManifest
 	require.NoError(t, yaml.Unmarshal(data, &manifest))
-	require.Equal(t, "0.10.0", manifest.Version)
+	// The release workflow updates the manifest version before it runs the
+	// verification suite, so this contract test must validate the version
+	// format rather than pinning a particular release number.
+	require.Regexp(t, `^[0-9]+\.[0-9]+\.[0-9]+$`, manifest.Version)
 	require.Equal(t, []string{"shared-tags", "tag-create", "tag-update", "tag-delete", "task-tag-add", "task-tag-remove"}, func() []string {
 		out := make([]string, len(manifest.Actions))
 		for i := range manifest.Actions {
