@@ -2477,8 +2477,13 @@
     if (typeof registry.registerTaskListFacet !== "function") return;
 
     var catalog = [];
+    // taskId -> tag ids, projected from the shared workspace catalog. Null
+    // means "this host has no shared-tags action (or it failed)", in which
+    // case getValues reads the per-user task-tag cache below instead.
+    var sharedTaskTags = null;
     var currentWorkspaceId = null;
     var unsubscribeCatalog = null;
+    var unsubscribeSharedTags = null;
     var listeners = [];
 
     function notify() {
@@ -2491,34 +2496,52 @@
       });
     }
 
+    /**
+     * The shared-tags store is the canonical catalog on hosts that support
+     * it, so the facet's Sort/Group options resolve current
+     * workspace-shared tag names/colors instead of a stale, near-empty
+     * legacy private catalog.
+     *
+     * Read it through getSharedTagStore rather than issuing a second,
+     * independent invokeAction: on a shared-tags host every mutation goes
+     * through an action (tag-create/tag-update/tag-delete, task-tag-add/
+     * task-tag-remove) and nothing ever writes CATALOG_SCOPE/TASK_SCOPE
+     * storage, so neither of this facet's own storage subscriptions fires.
+     * A private copy would therefore freeze at whatever the catalog looked
+     * like when the plugin loaded -- renames would keep showing the old
+     * group header and a newly applied tag would never leave Untagged
+     * until a full reload. Every one of those actions calls
+     * refreshSharedTags(), and ensureSharedTagRefresh adds a 30s/on-focus
+     * poll, so adopting that store is what makes /tasks react live.
+     */
     function refreshCatalog() {
       if (!currentWorkspaceId) {
         catalog = [];
+        sharedTaskTags = null;
         notify();
         return;
       }
-      // Mirrors registerTagFilter's refreshCatalog: the shared-tags action
-      // response is the canonical catalog on hosts that support it, so the
-      // facet's Sort/Group options resolve current workspace-shared tag
-      // names/colors instead of a stale, near-empty legacy private catalog.
       if (sharedTagsAvailable(host)) {
-        host.api.invokeAction("shared-tags", { workspaceId: currentWorkspaceId }).then(
-          function (payload) {
-            catalog = sanitizeCatalog(payload && payload.tags);
-            clearTaskTagCache();
-            Object.keys((payload && payload.tasks) || {}).forEach(function (taskId) {
-              setTaskTagCache(taskId, ((payload.tasks[taskId] || []).map(function (tag) { return tag.id; })));
-            });
-            notify();
-          },
-          function (err) {
-            // A pre-actions host still has the old private implementation;
-            // retain it as a transparent fallback.
-            loadPrivateCatalog(err);
-          },
-        );
-        return;
+        var store = getSharedTagStore(currentWorkspaceId);
+        if (!store.unavailable) {
+          var value = store.value || { tags: [], tasks: {} };
+          var tasks = value.tasks || {};
+          catalog = value.tags || [];
+          sharedTaskTags = {};
+          Object.keys(tasks).forEach(function (taskId) {
+            sharedTaskTags[taskId] = sanitizeTagIdList(
+              (tasks[taskId] || []).map(function (tag) {
+                return tag && tag.id;
+              }),
+            );
+          });
+          notify();
+          return;
+        }
+        // A pre-actions host still has the old private implementation;
+        // retain it as a transparent fallback.
       }
+      sharedTaskTags = null;
       loadPrivateCatalog();
     }
 
@@ -2538,16 +2561,36 @@
       );
     }
 
+    /** Listens to the one shared-tag store for this workspace, and kicks off its first load. */
+    function subscribeSharedTags(workspaceId) {
+      ensureSharedTagRefresh(host);
+      var store = getSharedTagStore(workspaceId);
+      store.listeners.push(refreshCatalog);
+      if (!store.loaded && !store.inFlight) fetchSharedTags(host, workspaceId);
+      return function () {
+        var idx = store.listeners.indexOf(refreshCatalog);
+        if (idx !== -1) store.listeners.splice(idx, 1);
+      };
+    }
+
     function setWorkspace(workspaceId) {
       if (workspaceId === currentWorkspaceId) return;
       currentWorkspaceId = workspaceId || null;
+      sharedTaskTags = null;
       clearTaskTagCache();
       if (unsubscribeCatalog) {
         unsubscribeCatalog();
         unsubscribeCatalog = null;
       }
+      if (unsubscribeSharedTags) {
+        unsubscribeSharedTags();
+        unsubscribeSharedTags = null;
+      }
       if (currentWorkspaceId) {
+        if (sharedTagsAvailable(host)) unsubscribeSharedTags = subscribeSharedTags(currentWorkspaceId);
         refreshCatalog();
+        // Kept even on a shared-tags host: it is the only live signal for
+        // the legacy private catalog the fallback above reads.
         unsubscribeCatalog = host.storage.subscribe(
           { scope: CATALOG_SCOPE, scopeId: currentWorkspaceId, key: CATALOG_KEY },
           refreshCatalog,
@@ -2562,6 +2605,8 @@
     addDisposable(function () {
       if (unsubscribeCatalog) unsubscribeCatalog();
       unsubscribeCatalog = null;
+      if (unsubscribeSharedTags) unsubscribeSharedTags();
+      unsubscribeSharedTags = null;
       listeners = [];
     });
     addDisposable(
@@ -2609,7 +2654,7 @@
         // task workspace context. A missing workspace keeps compatibility
         // with early host drafts and relies on the active-workspace reset.
         if (context.workspaceId && context.workspaceId !== currentWorkspaceId) return [];
-        var tagIds = getTaskTagCacheEntry(context.taskId);
+        var tagIds = sharedTaskTags ? sharedTaskTags[context.taskId] : getTaskTagCacheEntry(context.taskId);
         if (!tagIds) return [];
         return tagIds
           .map(function (tagId) {
@@ -2735,6 +2780,7 @@
       countTasksWithTag: countTasksWithTag,
       cascadeRemoveTagFromTasks: cascadeRemoveTagFromTasks,
       primeTaskTagCache: primeTaskTagCache,
+      fetchSharedTags: fetchSharedTags,
       registerTagTaskListFacet: registerTagTaskListFacet,
     },
   });

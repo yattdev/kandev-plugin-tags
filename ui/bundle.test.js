@@ -1601,6 +1601,66 @@ test("task-list facet falls back to the legacy private catalog when the shared-t
   ]);
 });
 
+test("task-list facet re-projects live when a shared tag is renamed or a task-tag action lands", async () => {
+  const plugin = loadBundle();
+  let facet = null;
+  let notified = 0;
+  // Shared-tags hosts never write CATALOG_SCOPE/TASK_SCOPE storage -- every
+  // mutation is an action followed by refreshSharedTags() -- so the facet
+  // must react to the shared store, not to its own storage subscriptions.
+  let payload = {
+    tags: [{ id: "t1", name: "Urgent", color: "#ef4444" }],
+    tasks: { "task-1": [{ id: "t1", name: "Urgent", color: "#ef4444" }] },
+  };
+  const host = makeMinimalHost({
+    storage: {
+      get: () => Promise.resolve(undefined),
+      subscribe: () => () => {},
+      listByKey: () => Promise.resolve({ entries: [], truncated: false }),
+    },
+    api: { invokeAction: () => Promise.resolve(payload) },
+  });
+  plugin.initialize(
+    {
+      registerComponent() {},
+      registerTaskMenuAction() {},
+      registerTaskListFacet(registration) {
+        facet = registration;
+      },
+    },
+    host,
+  );
+  await flush();
+  facet.subscribe(() => {
+    notified += 1;
+  });
+
+  assertStructural.deepEqual(facet.getValues({ workspaceId: "ws-1", taskId: "task-1" }), [
+    { value: "t1", label: "Urgent", color: "#ef4444" },
+  ]);
+
+  // A rename plus a task-tag-add, as the Tags box would apply them.
+  payload = {
+    tags: [{ id: "t1", name: "Defect", color: "#22c55e" }],
+    tasks: {
+      "task-1": [{ id: "t1", name: "Defect", color: "#22c55e" }],
+      "task-2": [{ id: "t1", name: "Defect", color: "#22c55e" }],
+    },
+  };
+  plugin.__internal.fetchSharedTags(host, "ws-1");
+  await flush();
+
+  assert.ok(notified > 0, "the facet notifies the task list instead of going stale");
+  assertStructural.deepEqual(facet.getValues({ workspaceId: "ws-1", taskId: "task-1" }), [
+    { value: "t1", label: "Defect", color: "#22c55e" },
+  ]);
+  assertStructural.deepEqual(
+    facet.getValues({ workspaceId: "ws-1", taskId: "task-2" }),
+    [{ value: "t1", label: "Defect", color: "#22c55e" }],
+    "a newly tagged task leaves the Untagged section without a reload",
+  );
+});
+
 test("registerTaskFilter's matches() treats an unseen card as untagged", () => {
   const plugin = loadBundle();
   const host = makeMinimalHost();
