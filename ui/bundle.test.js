@@ -1472,6 +1472,49 @@ test("bundle does not throw when the host predates registerTaskFilter (feature d
   });
 });
 
+test("Tier 0/1 host (no registerTaskListFacet, no host.taskFilters/listByKey) stays manage-only and registers no facet", async () => {
+  // This is the tier every currently shipped host runs: registerTaskFilter is
+  // present, but the task-list facet contract and the filter-selection API are
+  // not. The plugin must degrade to management + the built-in filter section
+  // without registering a facet or leaving a subscription behind.
+  const plugin = loadBundle();
+  const registered = { components: [], filters: [], facets: 0 };
+  let unsubscribed = 0;
+  const host = makeMinimalHost({
+    storage: {
+      get: () => Promise.resolve({ value: [{ id: "t1", name: "urgent", color: "#ef4444" }] }),
+      subscribe: () => () => { unsubscribed += 1; },
+      // deliberately no listByKey -- capabilities.scanStorage is false here
+    },
+  });
+  assert.doesNotThrow(() => {
+    plugin.initialize(
+      {
+        registerComponent(slot) { registered.components.push(slot); },
+        registerTaskMenuAction() {},
+        registerTaskFilter(registration) { registered.filters.push(registration); },
+        // no registerTaskListFacet -- the host contract does not exist yet
+      },
+      host,
+    );
+  });
+  await flush();
+
+  assert.ok(registered.components.includes("main-top-bar"), "the Tags box still registers");
+  assert.equal(registered.filters.length, 1, "the built-in filter fallback still registers");
+  assert.equal(registered.filters[0].hidden, false, "its section stays visible without the selection API");
+  assert.equal(registered.facets, 0, "no task-list facet is advertised on a host that cannot consume one");
+
+  const capabilities = plugin.__internal.detectHostCapabilities(
+    { registerTaskFilter() {} },
+    host,
+  );
+  assert.equal(capabilities.filterSelectionApi, false, "the Select is not rendered on this tier");
+  assert.equal(capabilities.scanStorage, false);
+
+  assert.doesNotThrow(() => plugin.destroy());
+});
+
 test("task-list facet is feature-detected and resolves catalog, legacy, and orphaned task tags", async () => {
   const plugin = loadBundle();
   let facet = null;
