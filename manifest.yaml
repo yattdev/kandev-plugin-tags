@@ -3,7 +3,7 @@
 # the kandev monorepo for the full schema.
 id: "kandev-plugin-tags"
 api_version: 1
-version: "0.11.0"
+version: "0.12.0"
 display_name: "Tags"
 description: "Create and apply workspace-shared colored tags from the board or an agent. Humans manage every shared tag; agents manage only agent-created tags, which display a bot marker when applied. On compatible hosts, the Tags box uses a single-select board filter (All, one tag, or Untagged) and contributes page-local Tag Sort/Group options to /tasks; older hosts retain management and the existing filter fallback."
 author: "yattdev"

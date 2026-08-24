@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.0] - 2026-08-24
+
+### Changed
+
+- fix: allow release-time manifest version (78808d2)
+- qa: cover the Tier 0/1 host that ships today (9ac3e9b)
+
+
 ## [0.11.0] - 2026-08-22
 
 ### Changed
