@@ -1774,6 +1774,17 @@
         });
       }, []);
 
+      // The catalog can change independently of this dropdown (for example,
+      // when another user or tab deletes a shared tag). A controlled Select
+      // cannot represent a value whose option has disappeared, so reconcile
+      // the host filter once the active catalog source has finished loading.
+      React.useEffect(function () {
+        if (!capabilities.filterSelectionApi || !loaded || !selected || selected.length === 0) return;
+        if (selected[0] === UNTAGGED_FILTER_VALUE || findTagById(catalog, selected[0])) return;
+        host.taskFilters.setSelection(TAGS_FILTER_ID, []);
+        setSelected([]);
+      }, [catalog, loaded, selected]);
+
       var renamingIdState = React.useState(null);
       var renamingId = renamingIdState[0];
       var setRenamingId = renamingIdState[1];

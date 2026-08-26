@@ -2066,18 +2066,30 @@ test("taskTagCache is cleared on workspace switch so one workspace's tags don't 
 /**
  * Minimal React-hooks-and-jsx stand-in sufficient to mount a plugin
  * component: useState/useEffect run against a single persistent state
- * array (mount runs effects once; state setters re-invoke the component),
- * and jsx() records the element tree as plain objects so tests can walk it.
+ * array (effects use React-like dependency comparison; state setters
+ * re-invoke the component), and jsx() records the element tree as plain
+ * objects so tests can walk it.
  */
 function makeFakeReactHost() {
   let hookIndex;
   const hookStates = [];
   let renderComponent = null;
   let tree;
+  let rendering = false;
+  let rerenderQueued = false;
 
   function rerender() {
-    hookIndex = 0;
-    tree = renderComponent();
+    if (rendering) {
+      rerenderQueued = true;
+      return;
+    }
+    do {
+      rerenderQueued = false;
+      hookIndex = 0;
+      rendering = true;
+      tree = renderComponent();
+      rendering = false;
+    } while (rerenderQueued);
   }
 
   const React = {
@@ -2092,10 +2104,18 @@ function makeFakeReactHost() {
     },
     useEffect(fn, deps) {
       const i = hookIndex++;
-      if (!(i in hookStates)) {
-        hookStates[i] = deps;
-        fn();
-      }
+      const previous = hookStates[i];
+      const changed =
+        !previous ||
+        !Array.isArray(deps) ||
+        !Array.isArray(previous.deps) ||
+        deps.length !== previous.deps.length ||
+        deps.some((dependency, index) => !Object.is(dependency, previous.deps[index]));
+      if (!changed) return;
+      if (previous && typeof previous.cleanup === "function") previous.cleanup();
+      const effect = { deps, cleanup: undefined };
+      hookStates[i] = effect;
+      effect.cleanup = fn();
     },
   };
   const jsx = (type, props, ...children) => ({ type, props, children });
@@ -2506,6 +2526,70 @@ test("detectHostCapabilities detects each tier independently", () => {
     },
   );
   assertStructural.deepEqual(tier2, { taskFilter: true, filterSelectionApi: true, scanStorage: true });
+});
+
+test("makeFakeReactHost re-runs changed dependency effects and cleans up", () => {
+  const fakeHost = makeFakeReactHost();
+  const events = [];
+  function Component() {
+    const state = fakeHost.React.useState("one");
+    const value = state[0];
+    const setValue = state[1];
+    fakeHost.React.useEffect(() => {
+      events.push("run:" + value);
+      return () => events.push("cleanup:" + value);
+    }, [value]);
+    return fakeHost.jsx("button", { onClick: () => setValue("two") });
+  }
+
+  const getTree = fakeHost.mount(Component, {});
+  getTree().props.onClick();
+  getTree().props.onClick();
+  assertStructural.deepEqual(events, ["run:one", "cleanup:one", "run:two"]);
+});
+
+test("TagsTopBarDropdown reconciles a shared catalog deletion without clearing valid pending selections", async () => {
+  let remoteTags = [{ id: "t1", name: "urgent", color: "#ef4444" }];
+  let focusListener;
+  const plugin = loadBundle(null, {
+    window: {
+      setInterval: () => 1,
+      clearInterval: () => {},
+      addEventListener(type, listener) { if (type === "focus") focusListener = listener; },
+      removeEventListener: () => {},
+    },
+  });
+  const { makeTagsTopBarDropdown } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = {
+    get: () => Promise.resolve({ value: [], updatedAt: "t0" }),
+    subscribe: () => () => {},
+  };
+  fakeHost.taskFilters = makeFakeTaskFilters(["t1"]);
+  fakeHost.api = {
+    invokeAction(key, input) {
+      assert.equal(key, "shared-tags");
+      assertStructural.deepEqual(input, { workspaceId: "ws-1" });
+      return Promise.resolve({ tags: remoteTags, tasks: {} });
+    },
+  };
+
+  const Dropdown = makeTagsTopBarDropdown(fakeHost, { taskFilter: true, filterSelectionApi: true, scanStorage: false });
+  const getTree = fakeHost.mount(Dropdown, { slotProps: { workspaceId: "ws-1" } });
+  assertStructural.deepEqual(fakeHost.taskFilters.getSelection(), ["t1"], "temporary unloaded catalog does not clear selection");
+  await flush();
+  assertStructural.deepEqual(fakeHost.taskFilters.getSelection(), ["t1"], "loaded catalog retains an existing tag");
+  assert.equal(getTree().children[1].children[1].children[1].props.value, "t1");
+
+  remoteTags = [];
+  focusListener();
+  await flush();
+  assertStructural.deepEqual(fakeHost.taskFilters.getSelection(), [], "removed shared tag clears the host filter");
+  assert.equal(getTree().children[1].children[1].children[1].props.value, plugin.__internal.ALL_TAGS_FILTER_VALUE);
+
+  fakeHost.taskFilters.setSelection("tags", [plugin.__internal.UNTAGGED_FILTER_VALUE]);
+  assertStructural.deepEqual(fakeHost.taskFilters.getSelection(), [plugin.__internal.UNTAGGED_FILTER_VALUE], "Untagged remains valid without a catalog entry");
 });
 
 test("TagsTopBarDropdown (Tier 2): renders a controlled Select and writes one filter value", async () => {
