@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.13.0] - 2026-08-28
+
+### Changed
+
+- docs: add QA screenshots for tag filter fix (5bdfc4e)
+- fix: clear stale tag filter selections (8563918)
+
+
 ## [0.12.0] - 2026-08-24
 
 ### Changed
