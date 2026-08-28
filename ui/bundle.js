@@ -921,11 +921,13 @@
     return Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
   }
 
-  // 404 is the host contract for an action that the installed plugin did not
-  // declare. It is the only rejection that proves the private-storage legacy
-  // path should replace the shared source of truth.
+  // A structured 404 with this exact host error is the contract for an action
+  // that the installed plugin did not declare. Other action-route 404s (for
+  // example, "workspace not found") must leave shared state authoritative.
   function sharedActionUnsupported(err) {
-    return actionErrorStatus(err) === 404;
+    if (actionErrorStatus(err) !== 404) return false;
+    var body = err && err.body;
+    return !!body && typeof body === "object" && body.error === "plugin action not found";
   }
 
   function sharedActionRetryable(err) {

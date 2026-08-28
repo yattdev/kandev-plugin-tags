@@ -63,11 +63,12 @@ function makeFakeConsole() {
   return { console: { error: (...args) => calls.error.push(args) }, calls };
 }
 
-/** Matches the structured status field exposed by the host's ApiError. */
-function apiError(status, message) {
+/** Matches the structured status/body fields exposed by the host's ApiError. */
+function apiError(status, message, body) {
   const err = new Error(message || "request failed with status " + status);
   err.name = "ApiError";
   err.status = status;
+  err.body = body === undefined ? { error: err.message } : body;
   return err;
 }
 
@@ -1198,7 +1199,7 @@ test("agent tag action absence or a definitive 404 degrades to user tags without
   assert.match(String(calls.error[0][0]), /load shared tags/);
 });
 
-test("shared action errors classify only structured 404 as unsupported", () => {
+test("shared action errors classify only the host's undeclared-action 404 as unsupported", () => {
   const {
     actionErrorStatus,
     sharedActionUnsupported,
@@ -1206,7 +1207,9 @@ test("shared action errors classify only structured 404 as unsupported", () => {
   } = loadBundle().__internal;
 
   assert.equal(actionErrorStatus(apiError(404)), 404);
-  assert.equal(sharedActionUnsupported(apiError(404)), true);
+  assert.equal(sharedActionUnsupported(apiError(404, "plugin action not found")), true);
+  assert.equal(sharedActionUnsupported(apiError(404, "workspace not found")), false);
+  assert.equal(sharedActionUnsupported(apiError(404, "plugin action not found", null)), false);
   assert.equal(sharedActionUnsupported(new Error("404 plugin action not found")), false);
 
   for (const status of [502, 503, 504]) {
@@ -1289,6 +1292,45 @@ test("a transient update failure retains the last shared catalog and recovers on
   assert.equal(consoleCalls.error.length, 1, "one outage is logged once");
 });
 
+test("transient shared-tag reads stop after the complete bounded retry budget", async () => {
+  let nextTimer = 1;
+  const timers = new Map();
+  let actionCalls = 0;
+  const plugin = loadBundle(makeFakeConsole().console, {
+    setTimeout(fn, delay) {
+      const id = nextTimer++;
+      timers.set(id, { fn, delay });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+  });
+  const host = {
+    api: {
+      invokeAction() {
+        actionCalls += 1;
+        return Promise.reject(apiError(503, "plugin is not active"));
+      },
+    },
+  };
+
+  await plugin.__internal.fetchSharedTags(host, "ws-1");
+  for (const expectedDelay of [250, 1000, 3000]) {
+    assert.equal(timers.size, 1, "exactly one retry remains scheduled");
+    const [id, timer] = [...timers.entries()][0];
+    assert.equal(timer.delay, expectedDelay);
+    timers.delete(id);
+    timer.fn();
+    await flush();
+  }
+
+  assert.equal(actionCalls, 4, "one initial read plus three retries");
+  assert.equal(timers.size, 0, "the retry budget is exhausted");
+  assert.equal(plugin.__internal.getSharedTagStore("ws-1").retryAttempt, 3);
+  plugin.destroy();
+});
+
 test("first-load 503 stays on the shared error path and destroy cancels its retry", async () => {
   let nextTimer = 1;
   const timers = new Map();
@@ -1330,6 +1372,21 @@ test("non-404 client errors remain shared load errors without immediate retry", 
     assert.equal(store.error.status, status, String(status));
     assert.equal(sharedTagsEnabled(host, "ws-" + status), true, String(status));
   }
+  plugin.destroy();
+});
+
+test("a workspace 404 remains a shared load error and never exposes legacy state", async () => {
+  const plugin = loadBundle();
+  const { fetchSharedTags, getSharedTagStore, sharedTagsEnabled } = plugin.__internal;
+  const host = {
+    api: { invokeAction: () => Promise.reject(apiError(404, "workspace not found")) },
+  };
+
+  await fetchSharedTags(host, "missing-workspace");
+  const store = getSharedTagStore("missing-workspace");
+  assert.equal(store.unavailable, false);
+  assert.equal(store.error.status, 404);
+  assert.equal(sharedTagsEnabled(host, "missing-workspace"), true);
   plugin.destroy();
 });
 
