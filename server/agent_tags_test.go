@@ -115,6 +115,84 @@ func TestAgentToolTruncatesNoteAndValidatesContext(t *testing.T) {
 	require.Contains(t, result.Text, "workspace_id")
 }
 
+func TestSharedTagsSurviveRuntimeReplacementAndCompatibleRollback(t *testing.T) {
+	require.Equal(t, "agent-tags", tagStateKey, "changing the state key orphans every existing workspace catalog")
+
+	host := &fakeHost{}
+	current := &tagsPlugin{}
+	current.SetHost(host)
+
+	// Build a mixed catalog and provenance-rich applications through the real
+	// human action and agent tool surfaces.
+	_, err := current.HandleAction(context.Background(), actionReq("tag-create", []byte(`{"name":"Human priority","color":"#ef4444"}`)))
+	require.NoError(t, err)
+	humanID := storedTagDoc(t, host, "ws-1").Tags[0].ID
+	agentID := agentCreate(t, current, "Waiting on API")
+
+	result, err := current.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{
+		"tag_id": agentID,
+		"note":   "credentials requested",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	_, err = current.HandleAction(context.Background(), actionReq("task-tag-add", []byte(`{"tagId":"`+agentID+`"}`)))
+	require.NoError(t, err)
+	_, err = current.HandleAction(context.Background(), actionReq("task-tag-add", []byte(`{"tagId":"`+humanID+`"}`)))
+	require.NoError(t, err)
+	secondTask := actionReq("task-tag-add", []byte(`{"tagId":"`+humanID+`"}`))
+	secondTask.Context.TaskID = "task-2"
+	_, err = current.HandleAction(context.Background(), secondTask)
+	require.NoError(t, err)
+
+	beforeReplacement := storedTagDoc(t, host, "ws-1")
+	_, setsBeforeRead, deletesBeforeRead := host.stateCallCounts()
+
+	// Kandev replaces the subprocess but retains the same host state namespace
+	// for an in-place update. A fresh plugin instance must read, not initialize
+	// over, the complete prior document.
+	replacement := &tagsPlugin{}
+	replacement.SetHost(host)
+	response, err := replacement.HandleAction(context.Background(), actionReq("shared-tags", nil))
+	require.NoError(t, err)
+	require.NotEmpty(t, response.Body)
+	afterReplacement, err := replacement.readTagDoc(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.Equal(t, beforeReplacement, afterReplacement)
+	_, setsAfterRead, deletesAfterRead := host.stateCallCounts()
+	require.Equal(t, setsBeforeRead, setsAfterRead, "replacement startup/read must not overwrite state")
+	require.Equal(t, deletesBeforeRead, deletesAfterRead, "replacement startup/read must not delete state")
+
+	// Mutate through the replacement, then model a rollback by binding another
+	// fresh runtime to the same namespace. Every field written by the newer
+	// compatible runtime must remain readable by the previous one.
+	result, err = replacement.InvokeAgentTool(context.Background(), agentToolReq("update_tag", map[string]any{
+		"tag_id": agentID,
+		"name":   "Waiting for API",
+		"color":  "#f59e0b",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	agentOnSecond := agentToolReq("add_tag", map[string]any{"tag_id": agentID, "note": "second task note"})
+	agentOnSecond.Context.TaskID = "task-2"
+	agentOnSecond.Context.SessionID = "session-2"
+	result, err = replacement.InvokeAgentTool(context.Background(), agentOnSecond)
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	expectedAfterRollback := storedTagDoc(t, host, "ws-1")
+	rollback := &tagsPlugin{}
+	rollback.SetHost(host)
+	_, setsBeforeRollbackRead, deletesBeforeRollbackRead := host.stateCallCounts()
+	afterRollback, err := rollback.readTagDoc(context.Background(), "ws-1")
+	require.NoError(t, err)
+	require.Equal(t, expectedAfterRollback, afterRollback)
+	_, setsAfterRollbackRead, deletesAfterRollbackRead := host.stateCallCounts()
+	require.Equal(t, setsBeforeRollbackRead, setsAfterRollbackRead)
+	require.Equal(t, deletesBeforeRollbackRead, deletesAfterRollbackRead)
+	require.Equal(t, "second task note", afterRollback.Tasks["task-2"][1].Note)
+	require.Equal(t, "session-2", afterRollback.Tasks["task-2"][1].SessionID)
+}
+
 func TestLegacyAgentStatusDocumentMigratesOnNextWrite(t *testing.T) {
 	p, host := newAgentTagTestPlugin()
 	legacy := map[string]any{"version": 1, "tasks": map[string]any{"task-1": []any{map[string]any{"tag": "blocked", "note": "waiting", "updated_at": "2026-01-01T00:00:00Z"}}}}

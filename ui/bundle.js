@@ -99,6 +99,12 @@
   var TOPBAR_DROPDOWN_Z_INDEX = 60;
   var MAX_TAGS_PER_TASK = 12;
   var CONFLICT_RETRY_LIMIT = 1;
+  // A plugin update briefly replaces the backend process. Reads issued in
+  // that window can receive 502/503/504 (or a network error) even though the
+  // shared action and its host-owned state still exist. Retry only this
+  // idempotent read, with a small bounded schedule; the regular 30-second
+  // refresh/focus hooks remain the long-tail recovery path after it is spent.
+  var SHARED_ACTION_RETRY_DELAYS = [250, 1000, 3000];
   // Radix Select reserves the empty string for clearing its own value, so
   // use a private non-empty sentinel for the "All tags" UI choice.
   var ALL_TAGS_FILTER_VALUE = "__all_tags__";
@@ -765,13 +771,14 @@
   // compatibility fallback for an older host or a user's pre-0.8 catalog.
   var sharedTagStores = {};
   var sharedTagRefreshTimer = null;
-  var sharedTagActionUnavailableLogged = false;
+  var sharedTagLoadErrorLogged = false;
 
   function makeStore() {
     return {
       value: [],
       loaded: false,
       error: null,
+      hasValue: false,
       listeners: [],
       inFlight: null,
       // Set when a fetch is requested while one is already in flight -- see
@@ -847,6 +854,7 @@
         settle(function () {
           store.value = sanitize(entry ? entry.value : undefined);
           store.error = null;
+          store.hasValue = true;
         });
       },
       function (err) {
@@ -887,6 +895,8 @@
       store = sharedTagStores[workspaceId] = makeStore();
       store.value = { tags: [], tasks: {} };
       store.unavailable = false;
+      store.retryAttempt = 0;
+      store.retryTimer = null;
     }
     return store;
   }
@@ -904,22 +914,111 @@
     return sharedTagsAvailable(host) && !!workspaceId && !getSharedTagStore(workspaceId).unavailable;
   }
 
+  /** Returns the structured ApiError HTTP status, or null for network/unknown errors. */
+  function actionErrorStatus(err) {
+    if (!err || (typeof err !== "object" && typeof err !== "function")) return null;
+    var status = Number(err.status);
+    return Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+  }
+
+  // 404 is the host contract for an action that the installed plugin did not
+  // declare. It is the only rejection that proves the private-storage legacy
+  // path should replace the shared source of truth.
+  function sharedActionUnsupported(err) {
+    return actionErrorStatus(err) === 404;
+  }
+
+  function sharedActionRetryable(err) {
+    var status = actionErrorStatus(err);
+    return status === null || status === 502 || status === 503 || status === 504;
+  }
+
+  function clearSharedTagRetry(store, resetAttempt) {
+    if (store.retryTimer !== null) {
+      clearTimeout(store.retryTimer);
+      store.retryTimer = null;
+    }
+    if (resetAttempt) store.retryAttempt = 0;
+  }
+
+  function cancelSharedTagRetry(workspaceId) {
+    if (!workspaceId) return;
+    var store = sharedTagStores[workspaceId];
+    if (store) clearSharedTagRetry(store, true);
+  }
+
+  function scheduleSharedTagRetry(host, workspaceId) {
+    var store = getSharedTagStore(workspaceId);
+    if (store.unavailable || store.retryTimer !== null || store.retryAttempt >= SHARED_ACTION_RETRY_DELAYS.length) return;
+    var delay = SHARED_ACTION_RETRY_DELAYS[store.retryAttempt];
+    store.retryAttempt += 1;
+    store.retryTimer = setTimeout(function () {
+      store.retryTimer = null;
+      fetchSharedTags(host, workspaceId);
+    }, delay);
+  }
+
   function fetchSharedTags(host, workspaceId) {
     var store = getSharedTagStore(workspaceId);
     if (!host.api || typeof host.api.invokeAction !== "function") {
-      store.unavailable = true; store.value = { tags: [], tasks: {} }; store.loaded = true; store.error = null; notifyStoreListeners(store);
+      clearSharedTagRetry(store, true);
+      store.unavailable = true; store.value = { tags: [], tasks: {} }; store.loaded = true; store.error = null; store.hasValue = false; notifyStoreListeners(store);
       return Promise.resolve();
     }
-    return fetchStore(store, function () {
-      return host.api.invokeAction("shared-tags", { workspaceId: workspaceId }).then(function (payload) {
-        store.unavailable = false;
-        return { value: payload };
-      }).catch(function (err) {
-        store.unavailable = true;
-        if (!sharedTagActionUnavailableLogged) { sharedTagActionUnavailableLogged = true; logError("load shared tags", err); }
-        return { value: { tasks: {} } };
-      });
-    }, sanitizeSharedTags, "shared tags", function () { fetchSharedTags(host, workspaceId); });
+    if (store.inFlight) {
+      store.dirty = true;
+      return store.inFlight;
+    }
+    store.dirty = false;
+
+    function settle(apply, retryable) {
+      store.inFlight = null;
+      apply();
+      store.loaded = true;
+      notifyStoreListeners(store);
+      if (store.dirty) {
+        fetchSharedTags(host, workspaceId);
+      } else if (retryable) {
+        scheduleSharedTagRetry(host, workspaceId);
+      }
+    }
+
+    store.inFlight = host.api.invokeAction("shared-tags", { workspaceId: workspaceId }).then(
+      function (payload) {
+        settle(function () {
+          clearSharedTagRetry(store, true);
+          store.unavailable = false;
+          store.value = sanitizeSharedTags(payload);
+          store.error = null;
+          store.hasValue = true;
+          sharedTagLoadErrorLogged = false;
+        }, false);
+      },
+      function (err) {
+        var unsupported = sharedActionUnsupported(err);
+        var retryable = !unsupported && sharedActionRetryable(err);
+        settle(function () {
+          if (unsupported) {
+            clearSharedTagRetry(store, true);
+            store.unavailable = true;
+            store.value = { tags: [], tasks: {} };
+            store.error = null;
+            store.hasValue = false;
+          } else {
+            // Preserve the last confirmed shared value. In particular, never
+            // make a transient update race authorize writes to legacy private
+            // storage merely because the replacement process is not ready.
+            store.unavailable = false;
+            store.error = err;
+          }
+          if (!sharedTagLoadErrorLogged) {
+            sharedTagLoadErrorLogged = true;
+            logError("load shared tags", err);
+          }
+        }, retryable);
+      },
+    );
+    return store.inFlight;
   }
 
   function ensureSharedTagRefresh(host) {
@@ -997,7 +1096,7 @@
       [scopeId],
     );
 
-    if (!scopeId) return [[], true, function () {}, null];
+    if (!scopeId) return [[], true, function () {}, null, true];
     var store = getStore(scopeId);
     return [
       store.value,
@@ -1006,6 +1105,7 @@
         fetchFn(host, scopeId);
       },
       store.error,
+      store.hasValue,
     ];
   }
 
@@ -1067,9 +1167,12 @@
     catalogStores = {};
     clearTaskTagCache();
     taskTagWideUnsubscribe = null;
+    Object.keys(sharedTagStores).forEach(function (workspaceId) {
+      clearSharedTagRetry(sharedTagStores[workspaceId], true);
+    });
     sharedTagStores = {};
     sharedTagRefreshTimer = null;
-    sharedTagActionUnavailableLogged = false;
+    sharedTagLoadErrorLogged = false;
   }
 
   // ---------------------------------------------------------------------
@@ -1190,8 +1293,14 @@
       var sharedTags = sharedTagsAndLoaded[0];
       var sharedTagsLoaded = sharedTagsAndLoaded[1];
       var refreshSharedTags = sharedTagsAndLoaded[2];
+      var sharedTagsLoadError = sharedTagsAndLoaded[3];
+      var sharedTagsHaveValue = sharedTagsAndLoaded[4];
 
       if (!resolvedWorkspaceId || !tagIdsLoaded || !catalogLoaded || !sharedTagsLoaded) return null;
+      // On a first-load update race, do not render only the legacy layer and
+      // make the still-authoritative shared tags look deleted. A cached shared
+      // value remains safe to render while its retry is in progress.
+      if (sharedTagsLoadError && !sharedTagsHaveValue) return null;
 
       function handleRemove(tag) {
         if (tag.shared) {
@@ -1278,6 +1387,7 @@
       var sharedTags = sharedTagsAndLoaded[0];
       var sharedTagsLoaded = sharedTagsAndLoaded[1];
       var refreshSharedTags = sharedTagsAndLoaded[2];
+      var sharedTagsLoadError = sharedTagsAndLoaded[3];
       var useShared = sharedTagsEnabled(host, resolvedWorkspaceId);
       if (useShared) {
         catalog = sharedTags.tags;
@@ -1292,7 +1402,7 @@
       var error = errorState[0];
       var setError = errorState[1];
 
-      var loadError = catalogLoadError || tagIdsLoadError;
+      var loadError = useShared ? sharedTagsLoadError : catalogLoadError || tagIdsLoadError;
       var loaded = tagIdsLoaded && catalogLoaded;
       var name = normalizeName(draft);
       var existingMatch = name ? findTagByName(catalog, name) : null;
@@ -1753,10 +1863,12 @@
       var sharedTags = sharedTagsAndLoaded[0];
       var sharedTagsLoaded = sharedTagsAndLoaded[1];
       var refreshSharedTags = sharedTagsAndLoaded[2];
+      var sharedTagsLoadError = sharedTagsAndLoaded[3];
       var useShared = sharedTagsEnabled(host, resolvedWorkspaceId);
       if (useShared) {
         catalog = sharedTags.tags;
         loaded = sharedTagsLoaded;
+        loadError = sharedTagsLoadError;
       }
 
       // Not a lazy initializer function: the plugin's minimal test React
@@ -1779,7 +1891,7 @@
       // cannot represent a value whose option has disappeared, so reconcile
       // the host filter once the active catalog source has finished loading.
       React.useEffect(function () {
-        if (!capabilities.filterSelectionApi || !loaded || !selected || selected.length === 0) return;
+        if (!capabilities.filterSelectionApi || !loaded || loadError || !selected || selected.length === 0) return;
         if (selected[0] === UNTAGGED_FILTER_VALUE || findTagById(catalog, selected[0])) return;
         host.taskFilters.setSelection(TAGS_FILTER_ID, []);
         setSelected([]);
@@ -2335,37 +2447,42 @@
     var catalog = [];
     var currentWorkspaceId = null;
     var unsubscribeStorage = null;
+    var unsubscribeSharedTags = null;
+
+    // Keep the board filter on the same authoritative shared store used by
+    // chips, the manager, and the task-list facet. In particular, a
+    // replacement-time 503 must not expose the private compatibility layer.
+    function adoptSharedCatalog() {
+      if (!currentWorkspaceId) return;
+      var store = getSharedTagStore(currentWorkspaceId);
+      if (store.unavailable) {
+        loadPrivateCatalog();
+        return;
+      }
+      if (!store.hasValue) return;
+      var payload = store.value || { tags: [], tasks: {} };
+      catalog = sanitizeCatalog(payload.tags);
+      clearTaskTagCache();
+      Object.keys(payload.tasks || {}).forEach(function (taskId) {
+        setTaskTagCache(taskId, ((payload.tasks[taskId] || []).map(function (tag) { return tag.id; })));
+      });
+    }
 
     function refreshCatalog() {
       if (!currentWorkspaceId) {
         catalog = [];
         return;
       }
-      // The action response is the canonical shared catalog. Prime the same
-      // cache used by matches() so filtering works for agent and human chips,
-      // including cards that have not mounted a chip component yet.
       if (sharedTagsAvailable(host)) {
-        host.api.invokeAction("shared-tags", { workspaceId: currentWorkspaceId }).then(
-          function (payload) {
-            catalog = sanitizeCatalog(payload && payload.tags);
-            clearTaskTagCache();
-            Object.keys((payload && payload.tasks) || {}).forEach(function (taskId) {
-              setTaskTagCache(taskId, ((payload.tasks[taskId] || []).map(function (tag) { return tag.id; })));
-            });
-          },
-          function (err) {
-            // A pre-actions host still has the old private implementation;
-            // retain it as a transparent fallback rather than breaking the
-            // board filter because the new endpoint is unavailable.
-            loadPrivateCatalog(err);
-          },
-        );
+        var store = getSharedTagStore(currentWorkspaceId);
+        if (!store.loaded && !store.inFlight) fetchSharedTags(host, currentWorkspaceId);
+        adoptSharedCatalog();
         return;
       }
       loadPrivateCatalog();
     }
 
-    function loadPrivateCatalog(actionErr) {
+    function loadPrivateCatalog() {
       host.storage.get(CATALOG_SCOPE, currentWorkspaceId, CATALOG_KEY).then(
         function (entry) {
           catalog = sanitizeCatalog(entry ? entry.value : []);
@@ -2373,9 +2490,20 @@
         function (err) {
           // Previously unhandled (D3) -- an unhandled rejection fired on
           // every workspace switch that hit a storage error.
-          logError("load tag filter catalog", actionErr || err);
+          logError("load tag filter catalog", err);
         },
       );
+    }
+
+    function subscribeSharedTags(workspaceId) {
+      ensureSharedTagRefresh(host);
+      var store = getSharedTagStore(workspaceId);
+      store.listeners.push(adoptSharedCatalog);
+      if (!store.loaded && !store.inFlight) fetchSharedTags(host, workspaceId);
+      return function () {
+        var idx = store.listeners.indexOf(adoptSharedCatalog);
+        if (idx !== -1) store.listeners.splice(idx, 1);
+      };
     }
 
     // The active workspace is not necessarily known yet the moment
@@ -2387,7 +2515,9 @@
     // resolves.
     function setWorkspace(workspaceId) {
       if (workspaceId === currentWorkspaceId) return;
+      var previousWorkspaceId = currentWorkspaceId;
       currentWorkspaceId = workspaceId || null;
+      cancelSharedTagRetry(previousWorkspaceId);
       // A tag set gathered under the previous workspace must never inform
       // this one's filter (D13/AC20).
       clearTaskTagCache();
@@ -2395,8 +2525,13 @@
         unsubscribeStorage();
         unsubscribeStorage = null;
       }
+      if (unsubscribeSharedTags) {
+        unsubscribeSharedTags();
+        unsubscribeSharedTags = null;
+      }
       if (currentWorkspaceId) {
         refreshCatalog();
+        if (sharedTagsAvailable(host)) unsubscribeSharedTags = subscribeSharedTags(currentWorkspaceId);
         if (capabilities.scanStorage) primeTaskTagCache(host);
         unsubscribeStorage = host.storage.subscribe(
           { scope: CATALOG_SCOPE, scopeId: currentWorkspaceId, key: CATALOG_KEY },
@@ -2414,6 +2549,10 @@
       if (unsubscribeStorage) {
         unsubscribeStorage();
         unsubscribeStorage = null;
+      }
+      if (unsubscribeSharedTags) {
+        unsubscribeSharedTags();
+        unsubscribeSharedTags = null;
       }
     });
 
@@ -2489,8 +2628,9 @@
 
     var catalog = [];
     // taskId -> tag ids, projected from the shared workspace catalog. Null
-    // means "this host has no shared-tags action (or it failed)", in which
-    // case getValues reads the per-user task-tag cache below instead.
+    // means this host definitively has no shared-tags action, in which case
+    // getValues reads the per-user task-tag cache below instead. Transient
+    // action failures retain the shared source and its last confirmed value.
     var sharedTaskTags = null;
     var currentWorkspaceId = null;
     var unsubscribeCatalog = null;
@@ -2586,9 +2726,11 @@
 
     function setWorkspace(workspaceId) {
       if (workspaceId === currentWorkspaceId) return;
+      var previousWorkspaceId = currentWorkspaceId;
       currentWorkspaceId = workspaceId || null;
       sharedTaskTags = null;
       clearTaskTagCache();
+      cancelSharedTagRetry(previousWorkspaceId);
       if (unsubscribeCatalog) {
         unsubscribeCatalog();
         unsubscribeCatalog = null;
@@ -2791,6 +2933,11 @@
       countTasksWithTag: countTasksWithTag,
       cascadeRemoveTagFromTasks: cascadeRemoveTagFromTasks,
       primeTaskTagCache: primeTaskTagCache,
+      actionErrorStatus: actionErrorStatus,
+      sharedActionUnsupported: sharedActionUnsupported,
+      sharedActionRetryable: sharedActionRetryable,
+      sharedTagsEnabled: sharedTagsEnabled,
+      getSharedTagStore: getSharedTagStore,
       fetchSharedTags: fetchSharedTags,
       registerTagTaskListFacet: registerTagTaskListFacet,
     },

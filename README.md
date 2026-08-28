@@ -178,6 +178,29 @@ no chip at all rather than a chip labeled with the raw id.
 Tags does not use, request, or spend LLM tokens, and has no external
 service or analytics integration.
 
+## Version changes and data safety
+
+Update or roll back by installing the other package over the existing
+`kandev-plugin-tags` installation. Kandev's in-place version-change path
+replaces the plugin process and package while retaining both its workspace
+state and its per-user compatibility state. The plugin keeps the same
+`agent-tags` workspace document across those process replacements, so
+shared tag definitions, task applications, colors, ownership, agent notes,
+and human/agent provenance remain intact.
+
+Compatible shared-catalog releases (0.9.0 and newer) can read the same
+document in either direction. A pre-0.9 release cannot display tags created
+in the newer shared catalog, but it does not migrate or erase that catalog;
+installing a compatible release again makes those tags visible. Pre-0.9
+private browser tags continue to use the legacy read-only layer described
+above.
+
+Do not uninstall as part of an update or rollback: explicit uninstall is the
+destructive lifecycle action and intentionally removes plugin state. During
+an in-place replacement the UI may briefly show a loading error while the new
+process starts; it keeps shared state authoritative and retries the read
+instead of treating the catalog as empty.
+
 ## Development
 
 Developed against a local checkout of the kandev monorepo (see the

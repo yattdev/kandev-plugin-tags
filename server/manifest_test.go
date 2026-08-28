@@ -9,7 +9,12 @@ import (
 )
 
 type testManifest struct {
-	Version string `yaml:"version"`
+	ID           string `yaml:"id"`
+	Version      string `yaml:"version"`
+	Capabilities struct {
+		State     bool `yaml:"state"`
+		UserState bool `yaml:"user_state"`
+	} `yaml:"capabilities"`
 	Actions []struct {
 		Key   string `yaml:"key"`
 		Scope string `yaml:"scope"`
@@ -36,10 +41,22 @@ func TestManifestDeclaresSharedCatalogContract(t *testing.T) {
 	// verification suite, so this contract test must validate the version
 	// format rather than pinning a particular release number.
 	require.Regexp(t, `^[0-9]+\.[0-9]+\.[0-9]+$`, manifest.Version)
+	// These values address persisted workspace/private state. Changing the id
+	// or dropping either capability makes existing tags inaccessible.
+	require.Equal(t, "kandev-plugin-tags", manifest.ID)
+	require.True(t, manifest.Capabilities.State)
+	require.True(t, manifest.Capabilities.UserState)
 	require.Equal(t, []string{"shared-tags", "tag-create", "tag-update", "tag-delete", "task-tag-add", "task-tag-remove"}, func() []string {
 		out := make([]string, len(manifest.Actions))
 		for i := range manifest.Actions {
 			out[i] = manifest.Actions[i].Key
+		}
+		return out
+	}())
+	require.Equal(t, []string{"workspace", "workspace", "workspace", "workspace", "task", "task"}, func() []string {
+		out := make([]string, len(manifest.Actions))
+		for i := range manifest.Actions {
+			out[i] = manifest.Actions[i].Scope
 		}
 		return out
 	}())

@@ -63,6 +63,14 @@ function makeFakeConsole() {
   return { console: { error: (...args) => calls.error.push(args) }, calls };
 }
 
+/** Matches the structured status field exposed by the host's ApiError. */
+function apiError(status, message) {
+  const err = new Error(message || "request failed with status " + status);
+  err.name = "ApiError";
+  err.status = status;
+  return err;
+}
+
 /**
  * A fake `document` whose `canvas.getContext("2d")` mimics the behaviour
  * resolveRgb's canvas branch depends on, as measured against a real
@@ -1155,7 +1163,7 @@ test("agent status chip removal invokes the task action and refreshes the shared
   assert.equal(getTree(), null, "the chip row disappears after the refreshed store no longer has tags");
 });
 
-test("agent tag action absence or rejection degrades to user tags without throwing", async () => {
+test("agent tag action absence or a definitive 404 degrades to user tags without throwing", async () => {
   const missingActionPlugin = loadBundle();
   const { makeTagChips: makeMissingActionChips } = missingActionPlugin.__internal;
   const missingActionHost = makeFakeReactHost();
@@ -1179,7 +1187,7 @@ test("agent tag action absence or rejection degrades to user tags without throwi
   const rejectingHost = makeFakeReactHost();
   rejectingHost.store = missingActionHost.store;
   rejectingHost.storage = missingActionHost.storage;
-  rejectingHost.api = { invokeAction: () => Promise.reject(new Error("404")) };
+  rejectingHost.api = { invokeAction: () => Promise.reject(apiError(404, "plugin action not found")) };
   const rejectingTree = rejectingHost.mount(makeRejectingChips(rejectingHost, { removable: true }), {
     slotProps: { taskId: "task-1", workspaceId: "ws-1" },
   });
@@ -1188,6 +1196,141 @@ test("agent tag action absence or rejection degrades to user tags without throwi
   assert.equal(rejectingTree().children[0][0].children[0], "urgent");
   assert.equal(calls.error.length, 1, "a rejecting action is logged once");
   assert.match(String(calls.error[0][0]), /load shared tags/);
+});
+
+test("shared action errors classify only structured 404 as unsupported", () => {
+  const {
+    actionErrorStatus,
+    sharedActionUnsupported,
+    sharedActionRetryable,
+  } = loadBundle().__internal;
+
+  assert.equal(actionErrorStatus(apiError(404)), 404);
+  assert.equal(sharedActionUnsupported(apiError(404)), true);
+  assert.equal(sharedActionUnsupported(new Error("404 plugin action not found")), false);
+
+  for (const status of [502, 503, 504]) {
+    assert.equal(sharedActionRetryable(apiError(status)), true, String(status));
+  }
+  assert.equal(sharedActionRetryable(new TypeError("fetch failed")), true, "network failures retry");
+  for (const status of [400, 401, 403, 404, 500]) {
+    assert.equal(sharedActionRetryable(apiError(status)), false, String(status));
+  }
+});
+
+test("a transient update failure retains the last shared catalog and recovers on one bounded retry", async () => {
+  let nextTimer = 1;
+  const timers = new Map();
+  const { console: fakeConsole, calls: consoleCalls } = makeFakeConsole();
+  const plugin = loadBundle(fakeConsole, {
+    setTimeout(fn, delay) {
+      const id = nextTimer++;
+      timers.set(id, { fn, delay });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+  });
+  const { fetchSharedTags, getSharedTagStore, sharedTagsEnabled } = plugin.__internal;
+  const stable = {
+    tags: [{ id: "tag-1", name: "Release", color: "#3b82f6" }],
+    tasks: { "task-1": [{ id: "tag-1", name: "Release", color: "#3b82f6" }] },
+  };
+  let response = stable;
+  let actionCalls = 0;
+  const storageCalls = { set: 0, delete: 0 };
+  const host = {
+    api: {
+      invokeAction() {
+        actionCalls += 1;
+        return response instanceof Error ? Promise.reject(response) : Promise.resolve(response);
+      },
+    },
+    storage: {
+      set() {
+        storageCalls.set += 1;
+        return Promise.resolve();
+      },
+      delete() {
+        storageCalls.delete += 1;
+        return Promise.resolve();
+      },
+    },
+  };
+
+  await fetchSharedTags(host, "ws-1");
+  const store = getSharedTagStore("ws-1");
+  assert.equal(store.hasValue, true);
+  assertStructural.deepEqual(store.value, stable);
+
+  response = apiError(503, "plugin is not active");
+  await fetchSharedTags(host, "ws-1");
+
+  assert.equal(sharedTagsEnabled(host, "ws-1"), true, "503 never authorizes legacy fallback");
+  assert.equal(store.hasValue, true);
+  assertStructural.deepEqual(store.value, stable, "the last confirmed shared value remains visible");
+  assert.equal(store.error.status, 503);
+  assert.equal(timers.size, 1, "one retry is scheduled");
+  assert.equal([...timers.values()][0].delay, 250, "the first retry is prompt");
+  assert.deepEqual(storageCalls, { set: 0, delete: 0 }, "recovery never writes private storage");
+
+  response = stable;
+  const retry = [...timers.entries()][0];
+  timers.delete(retry[0]);
+  retry[1].fn();
+  await flush();
+
+  assert.equal(actionCalls, 3);
+  assert.equal(store.error, null);
+  assert.equal(store.retryAttempt, 0);
+  assert.equal(timers.size, 0);
+  assertStructural.deepEqual(store.value, stable);
+  assert.equal(consoleCalls.error.length, 1, "one outage is logged once");
+});
+
+test("first-load 503 stays on the shared error path and destroy cancels its retry", async () => {
+  let nextTimer = 1;
+  const timers = new Map();
+  const plugin = loadBundle(null, {
+    setTimeout(fn, delay) {
+      const id = nextTimer++;
+      timers.set(id, { fn, delay });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+  });
+  const { fetchSharedTags, getSharedTagStore, sharedTagsEnabled } = plugin.__internal;
+  const host = {
+    api: { invokeAction: () => Promise.reject(apiError(503, "plugin is not active")) },
+  };
+
+  await fetchSharedTags(host, "ws-1");
+  const store = getSharedTagStore("ws-1");
+  assert.equal(store.hasValue, false);
+  assert.equal(store.error.status, 503);
+  assert.equal(store.unavailable, false);
+  assert.equal(sharedTagsEnabled(host, "ws-1"), true, "private storage is not made authoritative");
+  assert.equal(timers.size, 1);
+
+  plugin.destroy();
+  assert.equal(timers.size, 0, "destroy cancels an update retry");
+});
+
+test("non-404 client errors remain shared load errors without immediate retry", async () => {
+  const plugin = loadBundle();
+  const { fetchSharedTags, getSharedTagStore, sharedTagsEnabled } = plugin.__internal;
+  for (const status of [400, 401, 403]) {
+    const host = { api: { invokeAction: () => Promise.reject(apiError(status)) } };
+    await fetchSharedTags(host, "ws-" + status);
+    const store = getSharedTagStore("ws-" + status);
+    assert.equal(store.unavailable, false, String(status));
+    assert.equal(store.error.status, status, String(status));
+    assert.equal(sharedTagsEnabled(host, "ws-" + status), true, String(status));
+  }
+  plugin.destroy();
 });
 
 test("agent tag refresh interval is cleared on re-entrant initialize and destroy", async () => {
@@ -1624,7 +1767,7 @@ test("task-list facet falls back to the legacy private catalog when the shared-t
         Promise.resolve({ entries: [{ scopeId: "task-1", value: ["t1"] }], truncated: false }),
     },
     api: {
-      invokeAction: () => Promise.reject(new Error("404 plugin actions not supported")),
+      invokeAction: () => Promise.reject(apiError(404, "plugin action not found")),
     },
   });
   plugin.initialize(
@@ -1779,6 +1922,97 @@ test("registerTaskFilter registers even when activeWorkspaceId isn't set yet, an
   assert.ok(optionValues.includes("t1"), "catalog options appear once the workspace becomes known");
   assert.ok(optionValues.includes("__untagged__"));
 });
+
+test("registerTaskFilter keeps shared state authoritative through update failure and lifecycle changes", async () => {
+  let nextTimer = 1;
+  const timers = new Map();
+  const storeListeners = new Set();
+  let activeWorkspaceId = "ws-1";
+  let privateReads = 0;
+  let response = apiError(503, "plugin is not active");
+  let filterRegistration = null;
+  const plugin = loadBundle(makeFakeConsole().console, {
+    setTimeout(fn, delay) {
+      const id = nextTimer++;
+      timers.set(id, { fn, delay });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+  });
+  const host = makeMinimalHost({
+    api: {
+      invokeAction() {
+        return response instanceof Error ? Promise.reject(response) : Promise.resolve(response);
+      },
+    },
+    store: {
+      getState: () => ({ workspaces: { activeId: activeWorkspaceId } }),
+      subscribe(listener) {
+        storeListeners.add(listener);
+        return () => storeListeners.delete(listener);
+      },
+    },
+    storage: {
+      get() {
+        privateReads += 1;
+        return Promise.resolve({
+          value: [{ id: "legacy", name: "Legacy", color: "#ef4444" }],
+          updatedAt: "t0",
+        });
+      },
+      subscribe: () => () => {},
+    },
+  });
+  const registry = {
+    registerComponent() {},
+    registerTaskMenuAction() {},
+    registerTaskFilter(registration) {
+      filterRegistration = registration;
+    },
+  };
+
+  plugin.initialize(registry, host);
+  await flush();
+
+  assert.equal(privateReads, 0, "a 503 does not read the private fallback");
+  assertStructural.deepEqual(filterRegistration.getOptions().map((option) => option.value), ["__untagged__"]);
+  assert.equal(timers.size, 1);
+  const firstRetryId = [...timers.keys()][0];
+
+  activeWorkspaceId = "ws-2";
+  [...storeListeners].forEach((listener) => listener());
+  await flush();
+
+  assert.equal(timers.has(firstRetryId), false, "workspace change cancels the old retry");
+  assert.equal(timers.size, 1, "the new workspace owns one bounded retry");
+  const secondRetryId = [...timers.keys()][0];
+
+  plugin.initialize(registry, host);
+  await flush();
+
+  assert.equal(timers.has(secondRetryId), false, "re-initialize cancels the prior generation's retry");
+  assert.equal(timers.size, 1);
+
+  response = {
+    tags: [{ id: "shared", name: "Shared", color: "#22c55e" }],
+    tasks: { "task-1": [{ id: "shared", name: "Shared", color: "#22c55e" }] },
+  };
+  const recovery = [...timers.entries()][0];
+  timers.delete(recovery[0]);
+  recovery[1].fn();
+  await flush();
+
+  const values = filterRegistration.getOptions().map((option) => option.value);
+  assert.ok(values.includes("shared"), "the mounted filter adopts the recovered shared catalog");
+  assert.equal(values.includes("legacy"), false);
+  assert.equal(filterRegistration.matches({ taskId: "task-1" }, ["shared"]), true);
+  assert.equal(privateReads, 0, "recovery never consults private storage");
+  plugin.destroy();
+  assert.equal(timers.size, 0);
+});
+
 
 test("task filter options carry a renderable colour", async () => {
   // The host paints an option's `color` onto a swatch, so it needs the same
