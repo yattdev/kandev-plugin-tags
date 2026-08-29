@@ -77,6 +77,7 @@ func TestManifestDeclaresOptionalTaskIDOnTaskScopedAgentTools(t *testing.T) {
 	// task_id; it stays out of `required` so omitting it keeps today's
 	// caller's-own-task behaviour.
 	for _, name := range []string{"add_tag", "remove_tag", "list_tags"} {
+		require.Contains(t, tools, name, name+" must be declared in the manifest")
 		tool := manifest.AgentTools[tools[name]]
 		require.Contains(t, tool.InputSchema.Properties, "task_id", name)
 		require.Equal(t, "string", tool.InputSchema.Properties["task_id"]["type"], name)
@@ -88,6 +89,9 @@ func TestManifestDeclaresOptionalTaskIDOnTaskScopedAgentTools(t *testing.T) {
 	// Catalog tools operate on the workspace-wide tag list, not on any one
 	// task's applications, so they deliberately take no task_id.
 	for _, name := range []string{"create_tag", "update_tag", "delete_tag"} {
+		// Without this guard a missing name would index 0 (create_tag, which has
+		// no task_id) and the NotContains below would pass vacuously.
+		require.Contains(t, tools, name, name+" must be declared in the manifest")
 		tool := manifest.AgentTools[tools[name]]
 		require.NotContains(t, tool.InputSchema.Properties, "task_id",
 			name+" acts on the catalog, not a task")

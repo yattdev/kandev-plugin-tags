@@ -256,22 +256,46 @@ func (p *tagsPlugin) mutateTagDoc(ctx context.Context, workspaceID string, mutat
 	}
 	return doc, nil
 }
+
+// capTagTasks bounds the per-workspace document. Eviction prefers entries no
+// human has curated: targetTaskID accepts any task id an agent supplies, so a
+// mistyped or invented target must not be able to displace a person's tags --
+// it is stamped with now(), which under a plain oldest-first rule would make it
+// the last survivor rather than the first casualty. Within a class the oldest
+// entry goes first, and the task id breaks ties so eviction is deterministic
+// instead of following Go's randomized map iteration order.
 func (p *tagsPlugin) capTagTasks(doc *tagDoc) {
 	for len(doc.Tasks) > tagTaskCap {
-		var oldestID, oldest string
+		var victimID, victimOldest string
+		victimHuman := false
 		for id, entries := range doc.Tasks {
-			updated := ""
+			human, oldest := false, ""
 			for _, entry := range entries {
-				if updated == "" || entry.UpdatedAt < updated {
-					updated = entry.UpdatedAt
+				if entry.Human {
+					human = true
+				}
+				if oldest == "" || entry.UpdatedAt < oldest {
+					oldest = entry.UpdatedAt
 				}
 			}
-			if oldestID == "" || updated < oldest {
-				oldestID, oldest = id, updated
+			if victimID == "" || evictBefore(human, oldest, id, victimHuman, victimOldest, victimID) {
+				victimID, victimHuman, victimOldest = id, human, oldest
 			}
 		}
-		delete(doc.Tasks, oldestID)
+		delete(doc.Tasks, victimID)
 	}
+}
+
+// evictBefore reports whether the task entry described by (human, oldest, id)
+// should be evicted ahead of the current candidate.
+func evictBefore(human bool, oldest, id string, otherHuman bool, otherOldest, otherID string) bool {
+	if human != otherHuman {
+		return !human
+	}
+	if oldest != otherOldest {
+		return oldest < otherOldest
+	}
+	return id < otherID
 }
 
 func requireToolContext(req *pluginsdk.AgentToolRequest) string {
@@ -295,10 +319,14 @@ func requireToolContext(req *pluginsdk.AgentToolRequest) string {
 // fallback point -- no call site reads req.Context.TaskID directly.
 //
 // A supplied ID is not verified to name a real task; the plugin has no platform
-// client to ask. It needs no verification: doc.Tasks is a map inside the
-// caller's own workspace document, so a target can only ever address a task in
-// that workspace, and an entry for a task that does not exist renders nowhere
-// and is reaped by capTagTasks eviction and the deleteTag cascade.
+// client to ask. Workspace scoping still contains it: doc.Tasks is a map inside
+// the caller's own workspace document, so a target can only ever address a task
+// in that workspace, and the deleteTag cascade still clears every key.
+//
+// The residual cost is a wasted slot, not lost data. An entry for a task that
+// does not exist renders on no card but does occupy one of the tagTaskCap
+// slots, so capTagTasks -- not this function -- is what keeps an invented id
+// from displacing a real card's tags; see the eviction ordering there.
 func targetTaskID(req *pluginsdk.AgentToolRequest) string {
 	if id := strings.TrimSpace(agentArgString(req, "task_id")); id != "" {
 		return id

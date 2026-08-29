@@ -63,9 +63,11 @@ A `task_id` can only ever name a task in the **same workspace** — tags are
 stored in one document per workspace and the target is a key inside it, so an
 id belonging to another workspace is unreachable by construction rather than by
 a check. The plugin does not verify that the id names a real task; it has no
-platform client to ask. A mistyped id therefore creates an entry that renders
-on no card and is cleared by the plugin's existing eviction and by `delete_tag`.
-Read the id from the board rather than guessing it.
+platform client to ask. A mistyped id therefore creates an entry that renders on
+no card and merely occupies one of the workspace's tag slots until `delete_tag`
+or eviction clears it; eviction discards uncurated entries before ones a person
+has tagged, so a bad id cannot cost you a real card's tags. Read the id from the
+board rather than guessing it.
 
 `create_tag` and `list_tags` return `structuredContent.catalog`; copy the
 returned tag `id` into later calls. `add_tag` updates the existing agent

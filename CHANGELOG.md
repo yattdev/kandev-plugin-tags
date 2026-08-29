@@ -16,6 +16,15 @@
 - Tool descriptions no longer claim the task-scoped tools only act on "the
   current task".
 
+### Fixed
+
+- Task-tag eviction now discards entries no human has curated before ones a
+  person applied, and breaks ties on task id instead of Go's randomized map
+  order. Because an agent may name any `task_id`, the previous oldest-first
+  rule let a mistyped target -- stamped with the current time, so always the
+  newest entry -- survive at the cap while a real card's human-applied tags
+  were silently dropped.
+
 Targeting stays inside the caller's workspace: tags live in one document per
 workspace and a `task_id` is a key within it, so another workspace's tasks
 remain unreachable. Agent-ownership semantics are unchanged — `remove_tag`
