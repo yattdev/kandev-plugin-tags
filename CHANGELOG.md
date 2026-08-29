@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Agent `add_tag`, `remove_tag`, and `list_tags` MCP tools now accept an
+  optional `task_id`, letting an agent tag a card other than its own — the
+  case a coordinator organising a board needs. Omitting `task_id` behaves
+  exactly as before, acting on the calling agent's own task.
+
+### Changed
+
+- `create_tag`, `update_tag`, and `delete_tag` deliberately take no `task_id`:
+  they act on the workspace-wide catalog, not on one card's applications.
+- Tool descriptions no longer claim the task-scoped tools only act on "the
+  current task".
+
+Targeting stays inside the caller's workspace: tags live in one document per
+workspace and a `task_id` is a key within it, so another workspace's tasks
+remain unreachable. Agent-ownership semantics are unchanged — `remove_tag`
+still removes only this agent's application and leaves a human's intact.
+
+
 ## [0.13.0] - 2026-08-28
 
 ### Changed

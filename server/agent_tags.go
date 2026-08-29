@@ -278,13 +278,32 @@ func requireToolContext(req *pluginsdk.AgentToolRequest) string {
 	if req == nil {
 		return "request is missing"
 	}
-	if req.Context.TaskID == "" {
+	// Validating the resolved target rather than the raw context keeps the
+	// existing error for a callerless invocation while letting an explicit
+	// task_id stand on its own.
+	if targetTaskID(req) == "" {
 		return "task_id is required"
 	}
 	if req.Context.WorkspaceID == "" {
 		return "workspace_id is required"
 	}
 	return ""
+}
+
+// targetTaskID resolves the task a tool acts on: the optional task_id argument
+// when supplied, otherwise the calling agent's own task. This is the single
+// fallback point -- no call site reads req.Context.TaskID directly.
+//
+// A supplied ID is not verified to name a real task; the plugin has no platform
+// client to ask. It needs no verification: doc.Tasks is a map inside the
+// caller's own workspace document, so a target can only ever address a task in
+// that workspace, and an entry for a task that does not exist renders nowhere
+// and is reaped by capTagTasks eviction and the deleteTag cascade.
+func targetTaskID(req *pluginsdk.AgentToolRequest) string {
+	if id := strings.TrimSpace(agentArgString(req, "task_id")); id != "" {
+		return id
+	}
+	return req.Context.TaskID
 }
 func agentToolError(text string) *pluginsdk.AgentToolResult {
 	return &pluginsdk.AgentToolResult{Text: text, IsError: true}
@@ -339,6 +358,7 @@ func (p *tagsPlugin) InvokeAgentTool(ctx context.Context, req *pluginsdk.AgentTo
 	if msg := requireToolContext(req); msg != "" {
 		return agentToolError(msg), nil
 	}
+	taskID := targetTaskID(req)
 	switch req.Name {
 	case "create_tag":
 		name, err := normalizeTagName(agentArgString(req, "name"))
@@ -366,7 +386,7 @@ func (p *tagsPlugin) InvokeAgentTool(ctx context.Context, req *pluginsdk.AgentTo
 		if err != nil {
 			return agentToolError(err.Error()), nil
 		}
-		return agentResult("created agent tag "+created.Name, doc, req.Context.TaskID), nil
+		return agentResult("created agent tag "+created.Name, doc, taskID), nil
 	case "update_tag":
 		id := agentArgString(req, "tag_id")
 		nameArg, colorArg := agentArgString(req, "name"), agentArgString(req, "color")
@@ -405,7 +425,7 @@ func (p *tagsPlugin) InvokeAgentTool(ctx context.Context, req *pluginsdk.AgentTo
 		if err != nil {
 			return agentToolError(err.Error()), nil
 		}
-		return agentResult("updated agent tag", doc, req.Context.TaskID), nil
+		return agentResult("updated agent tag", doc, taskID), nil
 	case "delete_tag":
 		id := agentArgString(req, "tag_id")
 		if id == "" {
@@ -421,7 +441,7 @@ func (p *tagsPlugin) InvokeAgentTool(ctx context.Context, req *pluginsdk.AgentTo
 		if err != nil {
 			return agentToolError(err.Error()), nil
 		}
-		return agentResult("deleted agent tag", doc, req.Context.TaskID), nil
+		return agentResult("deleted agent tag", doc, taskID), nil
 	case "add_tag":
 		id := agentArgString(req, "tag_id")
 		if id == "" {
@@ -432,7 +452,7 @@ func (p *tagsPlugin) InvokeAgentTool(ctx context.Context, req *pluginsdk.AgentTo
 			if _, err := requireAgentOwnedTag(*doc, id); err != nil {
 				return err
 			}
-			entries := doc.Tasks[req.Context.TaskID]
+			entries := doc.Tasks[taskID]
 			i := findTaskTagIndex(entries, id)
 			timestamp := now()
 			if i < 0 {
@@ -443,13 +463,13 @@ func (p *tagsPlugin) InvokeAgentTool(ctx context.Context, req *pluginsdk.AgentTo
 				entries[i].SessionID = req.Context.SessionID
 				entries[i].UpdatedAt = timestamp
 			}
-			doc.Tasks[req.Context.TaskID] = entries
+			doc.Tasks[taskID] = entries
 			return nil
 		})
 		if err != nil {
 			return agentToolError(err.Error()), nil
 		}
-		return agentResult("added agent tag", doc, req.Context.TaskID), nil
+		return agentResult("added agent tag", doc, taskID), nil
 	case "remove_tag":
 		id := agentArgString(req, "tag_id")
 		if id == "" {
@@ -459,19 +479,19 @@ func (p *tagsPlugin) InvokeAgentTool(ctx context.Context, req *pluginsdk.AgentTo
 			if _, err := requireAgentOwnedTag(*doc, id); err != nil {
 				return err
 			}
-			removeAgentApplication(doc, req.Context.TaskID, id)
+			removeAgentApplication(doc, taskID, id)
 			return nil
 		})
 		if err != nil {
 			return agentToolError(err.Error()), nil
 		}
-		return agentResult("removed agent tag", doc, req.Context.TaskID), nil
+		return agentResult("removed agent tag", doc, taskID), nil
 	case "list_tags":
 		doc, err := p.readTagDoc(ctx, req.Context.WorkspaceID)
 		if err != nil {
 			return nil, err
 		}
-		return agentResult("listed shared tags", doc, req.Context.TaskID), nil
+		return agentResult("listed shared tags", doc, taskID), nil
 	default:
 		return agentToolError("unknown agent tool: " + req.Name), nil
 	}

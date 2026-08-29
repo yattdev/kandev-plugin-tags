@@ -101,7 +101,9 @@ agent_tools:
       destructive_hint: true
       idempotent_hint: true
   - name: add_tag
-    description: Add or update an agent-created tag on the current task.
+    description: >-
+      Add or update an agent-created tag on a task in this workspace. Acts on
+      the calling agent's own task unless task_id names another one.
     surfaces: [kanban-task]
     input_schema:
       type: object
@@ -110,6 +112,12 @@ agent_tools:
       properties:
         tag_id:
           type: string
+        task_id:
+          type: string
+          description: >-
+            Task to act on. Defaults to the calling agent's own task. Must be a
+            task in this workspace; tags are stored per workspace, so an id from
+            another workspace can never be reached.
         note:
           type: string
     annotations:
@@ -117,7 +125,10 @@ agent_tools:
       destructive_hint: false
       idempotent_hint: true
   - name: remove_tag
-    description: Remove this agent's application of an agent-created tag.
+    description: >-
+      Remove this agent's application of an agent-created tag from a task in
+      this workspace. Acts on the calling agent's own task unless task_id names
+      another one. A human's application of the same tag is left intact.
     surfaces: [kanban-task]
     input_schema:
       type: object
@@ -126,16 +137,31 @@ agent_tools:
       properties:
         tag_id:
           type: string
+        task_id:
+          type: string
+          description: >-
+            Task to act on. Defaults to the calling agent's own task. Must be a
+            task in this workspace; tags are stored per workspace, so an id from
+            another workspace can never be reached.
     annotations:
       read_only_hint: false
       destructive_hint: false
       idempotent_hint: true
   - name: list_tags
-    description: List the shared catalog and tags applied to the current task.
+    description: >-
+      List the shared catalog and the tags applied to a task in this workspace.
+      Reports the calling agent's own task unless task_id names another one.
     surfaces: [kanban-task]
     input_schema:
       type: object
       additionalProperties: false
+      properties:
+        task_id:
+          type: string
+          description: >-
+            Task to act on. Defaults to the calling agent's own task. Must be a
+            task in this workspace; tags are stored per workspace, so an id from
+            another workspace can never be reached.
     annotations:
       read_only_hint: true
       destructive_hint: false

@@ -17,7 +17,9 @@ An agent on a kanban task receives `create_tag`, `update_tag`, `delete_tag`,
 manage any tag whose origin is `agent`, including one made by a different
 agent; they cannot modify a human-created definition. Agent `add_tag` takes a
 `tag_id` from `list_tags` or `create_tag` and may include a note up to 200
-characters.
+characters. `add_tag`, `remove_tag`, and `list_tags` also accept an optional
+`task_id`, so an agent organising a board — a coordinator, say — can tag cards
+other than its own.
 
 When an agent creates or applies a tag, its chip is workspace-shared and shows
 the same yellow robot glyph used for autopilot tasks, as well as a dashed
@@ -35,24 +37,43 @@ it.
 ### Agent MCP workflow
 
 The tools are exposed only while an agent is running on a kanban task. Kandev
-binds the invocation to that task and workspace, so the agent must never pass
-or invent a task or workspace id.
+binds the invocation to that task and workspace. The workspace is never an
+argument and the agent must never invent one; the task defaults to the calling
+agent's own card, which the three task-scoped tools let you override.
 
 | Tool | Purpose | Required input |
 | --- | --- | --- |
 | `create_tag` | Create an agent-owned shared definition. | `name`; optional hex `color` |
-| `list_tags` | Read the shared catalog and current task applications. | none |
+| `list_tags` | Read the shared catalog and a task's applications. | none; optional `task_id` |
 | `update_tag` | Rename and/or recolor an agent-owned definition. | `tag_id`, plus `name` and/or `color` |
-| `add_tag` | Apply an agent-owned tag to the current task. | `tag_id`; optional `note` |
-| `remove_tag` | Remove the agent application from the current task. | `tag_id` |
+| `add_tag` | Apply an agent-owned tag to a task. | `tag_id`; optional `task_id`, `note` |
+| `remove_tag` | Remove the agent application from a task. | `tag_id`; optional `task_id` |
 | `delete_tag` | Delete an agent-owned definition and every application of it. | `tag_id` |
+
+#### Targeting another task
+
+`add_tag`, `remove_tag`, and `list_tags` act on the calling agent's own task
+unless you pass `task_id`. Omit it and behaviour is exactly as before.
+
+`create_tag`, `update_tag`, and `delete_tag` take no `task_id`: they act on the
+workspace-wide catalog rather than on any one card's applications, and
+`delete_tag` already cascades across every task.
+
+A `task_id` can only ever name a task in the **same workspace** — tags are
+stored in one document per workspace and the target is a key inside it, so an
+id belonging to another workspace is unreachable by construction rather than by
+a check. The plugin does not verify that the id names a real task; it has no
+platform client to ask. A mistyped id therefore creates an entry that renders
+on no card and is cleared by the plugin's existing eviction and by `delete_tag`.
+Read the id from the board rather than guessing it.
 
 `create_tag` and `list_tags` return `structuredContent.catalog`; copy the
 returned tag `id` into later calls. `add_tag` updates the existing agent
 application rather than duplicating it, and truncates notes to 200 characters.
-`remove_tag` is safe to retry. `delete_tag` is intentionally destructive: it
-removes the definition from all workspace tasks, so prefer `remove_tag` when a
-task has merely become unblocked or complete.
+`remove_tag` is safe to retry, and removes only *this* agent's application: a
+person's application of the same tag on that task survives. `delete_tag` is
+intentionally destructive: it removes the definition from all workspace tasks,
+so prefer `remove_tag` when a task has merely become unblocked or complete.
 
 Example instruction to give an agent:
 
@@ -76,6 +97,14 @@ For cleanup after a task-specific tag is no longer needed:
 Call remove_tag with the tag_id, then call list_tags to confirm it is gone from
 this task. Call delete_tag only if the agent-created definition should also be
 removed from every other task in this workspace.
+```
+
+To label a card other than the one the agent is running on:
+
+```text
+Call add_tag with the tag_id, the target card's task_id, and a short note
+saying why. Call list_tags with the same task_id to confirm the chip landed on
+that card. The target must be a task in this workspace.
 ```
 
 - **On every card**: tags you've added render as a row of small colored
