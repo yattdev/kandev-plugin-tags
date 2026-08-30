@@ -1131,7 +1131,8 @@
     var jsx = host.jsx;
 
     function chipEl(tag, handleRemove) {
-      var agentLabel = tag.agent ? tag.name + (tag.note ? " — " + tag.note : "") : undefined;
+      var displayNote = typeof tag.note === "string" ? tag.note.trim() : "";
+      var agentLabel = tag.agent ? tag.name + (displayNote ? " — " + displayNote : "") : undefined;
       var spanArgs = [
         "span",
         {
