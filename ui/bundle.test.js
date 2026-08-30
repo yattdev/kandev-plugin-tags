@@ -1189,6 +1189,80 @@ test("shared agent application suppresses a stale raw id on cards and dense rows
   }
 });
 
+test("filter-primed shared ids do not render as private raw chips after task storage returns 404", async () => {
+  const { console: fakeConsole, calls: consoleCalls } = makeFakeConsole();
+  const plugin = loadBundle(fakeConsole);
+  const fakeHost = makeFakeReactHost();
+  let TagChips = null;
+  let taskStorageGets = 0;
+  const sharedTags = [
+    { id: "tag-agent-123", name: "Agent ready", color: "#a855f7", agent: true },
+    { id: "tag-review-456", name: "Needs review", color: "#f59e0b", agent: true },
+    { id: "tag-whitespace", name: "Whitespace", color: "#22c55e", agent: false },
+    { id: "tag-human", name: "Human", color: "#ef4444", agent: false },
+  ];
+  const payload = {
+    tags: sharedTags,
+    tasks: {
+      "task-1": sharedTags.map((tag) => ({
+        id: tag.id,
+        name: tag.name,
+        color: tag.color,
+        agent: tag.agent,
+        agentApplied: tag.agent,
+        note: tag.agent ? "from coordinator" : "",
+      })),
+    },
+  };
+  fakeHost.store = {
+    getState: () => ({ workspaces: { activeId: "ws-1" } }),
+    subscribe: () => () => {},
+  };
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "task") {
+        taskStorageGets += 1;
+        return Promise.reject(new Error("GET user-state/task/task-1/tags: 404"));
+      }
+      return Promise.resolve(undefined);
+    },
+    subscribe: () => () => {},
+  };
+  fakeHost.api = { invokeAction: () => Promise.resolve(payload) };
+
+  plugin.initialize(
+    {
+      registerComponent(slot, Component) {
+        if (slot === "task-card-tags") TagChips = Component;
+      },
+      registerTaskMenuAction() {},
+      registerTaskFilter() {},
+    },
+    fakeHost,
+  );
+  const getTree = fakeHost.mount(TagChips, {
+    slotProps: { taskId: "task-1", workspaceId: "ws-1" },
+  });
+  await flush();
+
+  assert.equal(taskStorageGets, 1, "the fixture exercises the absent private task storage path");
+  assert.ok(
+    consoleCalls.error.some((args) => String(args[1]).includes("404")),
+    "the private-state 404 is observed rather than replaced with seeded private data",
+  );
+  const chips = getTree().children[0];
+  assert.equal(chips.length, 4, "one chip renders for each of the four canonical shared applications");
+  assertStructural.deepEqual(
+    chips.map((chip) => (chip.props["data-agent"] ? chip.children[1] : chip.children[0])),
+    ["Agent ready", "Needs review", "Whitespace", "Human"],
+  );
+  assert.equal(
+    chips.some((chip) => chip.children.includes("tag-whitespace") || chip.children.includes("tag-human")),
+    false,
+    "filter-cached stable ids never render as gray raw labels",
+  );
+});
+
 test("agent status tags render on dense task rows without a remove control and count toward +N", async () => {
   const plugin = loadBundle();
   const { makeTagChips } = plugin.__internal;
