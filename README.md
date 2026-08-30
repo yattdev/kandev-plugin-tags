@@ -23,10 +23,11 @@ other than its own.
 
 When an agent creates or applies a tag, its chip is workspace-shared and shows
 the same yellow robot glyph used for autopilot tasks, as well as a dashed
-border and an accessible “applied by agent” label. An agent-created definition
-keeps that marker even when a person later applies it; a person can remove any
-chip entirely. The UI refreshes shared tags on focus and at most every 30
-seconds.
+border. Its title and accessible label use “<tag> — <note>” when the application
+note contains text, or the tag name when it does not. An agent-created
+definition keeps the robot marker even when a person later applies it; a person
+can remove any chip entirely. The UI refreshes shared tags on focus and at most
+every 30 seconds.
 
 Tags created before 0.8.0 in private browser storage are preserved and still
 render for their owner. They cannot be safely auto-migrated or shared because

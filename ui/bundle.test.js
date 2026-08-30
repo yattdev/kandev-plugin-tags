@@ -1059,9 +1059,61 @@ test("agent status tags render before user tags on card chips from direct invoke
   assert.equal(chips[0].children[0].props["data-testid"], "kandev-tags-agent-icon");
   assert.equal(chips[0].props["data-agent"], "true");
   assert.equal(chips[0].props.style.border, "1px dashed currentColor");
-  assert.equal(chips[0].props.title, "Blocked — applied by agent: waiting on API keys");
-  assert.equal(chips[0].props["aria-label"], "Blocked — applied by agent: waiting on API keys");
+  assert.equal(chips[0].props.title, "Blocked — waiting on API keys");
+  assert.equal(chips[0].props["aria-label"], "Blocked — waiting on API keys");
   assert.equal(chips[1].children[0], "urgent");
+});
+
+test("card agent chip labels use application notes and empty/whitespace fallbacks without provenance copy", async () => {
+  const plugin = loadBundle();
+  const { makeTagChips } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "task") return Promise.resolve({ value: [], updatedAt: "t0" });
+      return Promise.resolve({ value: [], updatedAt: "t0" });
+    },
+    subscribe: () => () => {},
+  };
+  fakeHost.api = {
+    invokeAction() {
+      return Promise.resolve({
+        tags: [],
+        tasks: {
+          "task-1": [
+            { id: "agent-applied", name: "Blocked", color: "#dc2626", agent: true, agentApplied: true, note: "  waiting on API keys  ", updatedAt: "t1" },
+            { id: "agent-created", name: "Needs review", color: "#f59e0b", agent: true, agentApplied: false, human: true, note: "", updatedAt: "t2" },
+            { id: "human-created", name: "Customer", color: "#22c55e", agent: false, agentApplied: false, human: true, note: "", updatedAt: "t3" },
+            { id: "empty-note", name: "Queued", color: "#3b82f6", agent: true, agentApplied: true, note: "", updatedAt: "t4" },
+            { id: "whitespace-note", name: "Waiting", color: "#8b5cf6", agent: true, agentApplied: true, note: " \t ", updatedAt: "t5" },
+          ],
+        },
+      });
+    },
+  };
+
+  const getTree = fakeHost.mount(makeTagChips(fakeHost, { removable: true }), {
+    slotProps: { taskId: "task-1", workspaceId: "ws-1" },
+  });
+  await flush();
+
+  const chips = getTree().children[0];
+  assert.equal(chips[0].props.title, "Blocked — waiting on API keys", "agent application note supplies the action/reason copy");
+  assert.equal(chips[0].props["aria-label"], "Blocked — waiting on API keys");
+  assert.equal(chips[1].props.title, "Needs review", "agent-created/human-applied tag falls back to its name");
+  assert.equal(chips[1].props["aria-label"], "Needs review");
+  assert.equal(chips[2].props.title, undefined, "human-created tag keeps existing native text semantics");
+  assert.equal(chips[2].props["aria-label"], undefined);
+  assert.equal(chips[3].props.title, "Queued", "empty application note falls back to the tag name");
+  assert.equal(chips[3].props["aria-label"], "Queued");
+  assert.equal(chips[4].props.title, "Waiting", "whitespace-only application note falls back to the tag name");
+  assert.equal(chips[4].props["aria-label"], "Waiting");
+  assert.equal(chips[0].children[0].props["data-testid"], "kandev-tags-agent-icon");
+  assert.equal(chips[1].children[0].props["data-testid"], "kandev-tags-agent-icon");
+  assert.equal(chips[2].children[0], "Customer");
+  assert.equal(chips[3].children[0].props["data-testid"], "kandev-tags-agent-icon");
+  assert.equal(chips[4].children[0].props["data-testid"], "kandev-tags-agent-icon");
 });
 
 test("agent status tags render on dense task rows without a remove control and count toward +N", async () => {
@@ -1088,7 +1140,7 @@ test("agent status tags render on dense task rows without a remove control and c
         tags: [],
         tasks: {
           "task-1": [
-            { id: "blocked", name: "Blocked", color: "#dc2626", agent: true, agentApplied: true, note: "", updatedAt: "t1" },
+            { id: "blocked", name: "Blocked", color: "#dc2626", agent: true, agentApplied: true, note: " \t ", updatedAt: "t1" },
             { id: "needs-input", name: "Needs input", color: "#f59e0b", agent: true, agentApplied: true, note: "", updatedAt: "t2" },
           ],
         },
@@ -1106,6 +1158,8 @@ test("agent status tags render on dense task rows without a remove control and c
   assert.equal(chips.length, 3, "dense rows still cap at three total chips");
   assertStructural.deepEqual(chips.map((chip) => (chip.props["data-agent"] ? chip.children[1] : chip.children[0])), ["Blocked", "Needs input", "urgent"]);
   assert.equal(chips[0].children.length, 2, "dense agent chip has a bot marker but no remove button");
+  assert.equal(chips[0].props.title, "Blocked", "dense agent chip uses the same whitespace-only fallback");
+  assert.equal(chips[0].props["aria-label"], "Blocked");
   assert.equal(row.children[1].children[0], "+1", "hidden user tag is counted in +N");
 });
 
