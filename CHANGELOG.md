@@ -27,6 +27,11 @@
 
 ### Fixed
 
+- Agent `add_tag` now rejects creation of a new task key when the workspace tag
+  document already tracks 200 tasks. Existing self and cross-card keys remain
+  writable, and removing a task's last application frees capacity. This keeps
+  200+ invented `task_id` calls from evicting another card's agent-applied tags
+  without adding a platform task-existence lookup.
 - Task-tag eviction now discards entries no human has curated before ones a
   person applied, and breaks ties on task id instead of Go's randomized map
   order. Because an agent may name any `task_id`, the previous oldest-first

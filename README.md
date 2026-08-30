@@ -64,11 +64,13 @@ stored in one document per workspace and the target is a key inside it, so an
 id belonging to another workspace is unreachable by construction rather than by
 a check. The plugin does not verify that the id names a real task; it has no
 platform client to ask. A mistyped id therefore creates an entry that renders on
-no card and merely occupies one of the workspace's tag slots until `delete_tag`
-or eviction clears it; eviction discards uncurated entries before human-applied
-ones, so a bad id cannot cost you a human-applied tag, though sustained cap
-pressure can still evict agent-applied tags on other cards in the workspace.
-Read the id from the board rather than guessing it.
+no card and occupies one of the workspace document's 200 task slots. Once all
+200 slots are occupied, `add_tag` rejects a target not already in the document
+without changing any stored applications. Existing self and cross-card targets
+remain writable at capacity; `list_tags` and `remove_tag` also continue to work,
+and removing a task's last application or deleting a tag can free a slot.
+Consequently, repeated invented ids cannot evict another card's agent- or
+human-applied tags. Read the id from the board rather than guessing it.
 
 `create_tag` and `list_tags` return `structuredContent.catalog`; copy the
 returned tag `id` into later calls. `add_tag` updates the existing agent
@@ -196,8 +198,8 @@ host without that API this all degrades gracefully (no count, no cascade,
 filter only reasons about cards whose chips have actually rendered).
 Shared tags are visible to everyone who can access the workspace. The host
 authorizes every browser action against the signed-in person and constrains
-each agent invocation to its running task/session; no task or workspace id is
-accepted in an agent-tool input.
+each agent invocation to its running task/session. Task-scoped agent tools may
+accept another task id, but no workspace id is accepted in agent-tool input.
 
 Cards tagged before this release (a plain array of tag-name strings, no
 catalog) keep working: an id that isn't found in the catalog is rendered
