@@ -8,9 +8,6 @@
 - qa: protect human-applied tags from eviction by an invented task_id (1e9a58c)
 - feat: let agent tag tools target another task (b755410)
 
-
-## [Unreleased]
-
 ### Added
 
 - Agent `add_tag`, `remove_tag`, and `list_tags` MCP tools now accept an
