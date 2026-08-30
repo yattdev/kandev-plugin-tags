@@ -106,11 +106,14 @@
   var TAGS_FILTER_ID = "tags";
   var TASK_ROW_CHIP_LIMIT = 3;
 
-  // Shape of a generated catalog tag id (see makeTagId) -- used by
-  // resolveTag to distinguish an *orphaned* v2 tag id (deleted from the
-  // catalog but still referenced by a stale card) from a legacy v1
-  // plain-string tag name, which never looks like this.
-  var GENERATED_TAG_ID_RE = /^tag-[0-9a-z]+-[0-9a-z]+$/;
+  // Shapes of generated catalog tag ids -- used by resolveTag to distinguish
+  // an *orphaned* v2 tag id (deleted from the catalog but still referenced by
+  // a stale card) from a legacy v1 plain-string tag name. Browser-created v2
+  // ids use makeTagId's two base36 groups; the shared backend uses 10 random
+  // bytes encoded as exactly 20 lowercase hex characters (newTagID in
+  // server/agent_tags.go). Keep both shapes exact so similar legacy names
+  // such as "tag-deadbeef" remain visible.
+  var GENERATED_TAG_ID_RE = /^tag-(?:[0-9a-f]{20}|[0-9a-z]+-[0-9a-z]+)$/;
 
   // Distinct writerIds (not the shared per-tab default) so one surface's own
   // subscription doesn't treat another open surface's writes as its own echo
@@ -651,6 +654,33 @@
     if (found) return found;
     if (typeof id === "string" && GENERATED_TAG_ID_RE.test(id)) return null;
     return { id: id, name: String(id), color: DEFAULT_COLOR };
+  }
+
+  /**
+   * Combines canonical shared applications with the private compatibility
+   * projection. A task can retain the same stable id in both stores after an
+   * upgrade; shared data wins because it carries current ownership, note,
+   * removal, name, and color semantics. Dedupe within either source too so a
+   * malformed/migrated repeated id still renders as one logical application.
+   */
+  function mergeTagRepresentations(sharedTags, privateTags, sharedCatalog) {
+    var seenIds = [];
+    var merged = sharedTags.filter(function (tag) {
+      if (seenIds.indexOf(tag.id) !== -1) return false;
+      seenIds.push(tag.id);
+      return true;
+    });
+    privateTags.forEach(function (tag) {
+      // On a shared-actions host, catalog membership means this id is owned
+      // by the canonical store even when it is no longer applied to this
+      // task. Suppress the stale private copy so removal cannot make it
+      // reappear. Older hosts supply an empty shared catalog and retain their
+      // private v1/v2 behavior unchanged.
+      if (findTagById(sharedCatalog, tag.id) || seenIds.indexOf(tag.id) !== -1) return;
+      seenIds.push(tag.id);
+      merged.push(tag);
+    });
+    return merged;
   }
 
   function isConflictError(err) {
@@ -1220,9 +1250,10 @@
       var sharedTaskTags = (sharedTags.tasks[taskId] || []).map(function (tag) {
         return { id: tag.id, name: tag.name, color: tag.color, note: tag.note, agent: tag.agent === true, agentApplied: tag.agentApplied === true, shared: true };
       });
-      // Legacy private tags stay visible after upgrading. New interactions
-      // below write the shared catalog, which humans and agents both use.
-      resolvedTags = sharedTaskTags.concat(resolvedTags);
+      // Legacy private tags stay visible after upgrading. A shared application
+      // supersedes a private compatibility entry with the same stable id, so
+      // migrated overlap cannot render a second chip or raw generated id.
+      resolvedTags = mergeTagRepresentations(sharedTaskTags, resolvedTags, sharedTags.tags);
       if (resolvedTags.length === 0) return null;
 
       var visibleTags = dense ? resolvedTags.slice(0, TASK_ROW_CHIP_LIMIT) : resolvedTags;
@@ -2760,6 +2791,7 @@
       addTaskTagId: addTaskTagId,
       removeTaskTagId: removeTaskTagId,
       resolveTag: resolveTag,
+      mergeTagRepresentations: mergeTagRepresentations,
       isConflictError: isConflictError,
       logError: logError,
       resolveWorkspaceId: resolveWorkspaceId,

@@ -695,6 +695,18 @@ test("resolveTag returns null for an unresolved id shaped like a generated catal
   assert.equal(resolveTag([{ id: "t1", name: "bug", color: "#fff" }], orphanId), null);
 });
 
+test("resolveTag rejects an orphaned server-generated tag id without hiding similar legacy names", () => {
+  const { resolveTag, DEFAULT_COLOR } = loadBundle().__internal;
+  const currentServerId = "tag-6a1aeb09170bfffcfa5e";
+
+  assert.equal(resolveTag([], currentServerId), null);
+  assertStructural.deepEqual(resolveTag([], "tag-deadbeef"), {
+    id: "tag-deadbeef",
+    name: "tag-deadbeef",
+    color: DEFAULT_COLOR,
+  });
+});
+
 test("resolveTag still resolves a legacy plain-string id that happens not to match the generated-id shape", () => {
   const { resolveTag, DEFAULT_COLOR } = loadBundle().__internal;
   assertStructural.deepEqual(resolveTag([], "my custom tag"), {
@@ -1062,6 +1074,119 @@ test("agent status tags render before user tags on card chips from direct invoke
   assert.equal(chips[0].props.title, "Blocked — applied by agent: waiting on API keys");
   assert.equal(chips[0].props["aria-label"], "Blocked — applied by agent: waiting on API keys");
   assert.equal(chips[1].children[0], "urgent");
+});
+
+test("shared Human application replaces an overlapping private representation by stable id", async () => {
+  const plugin = loadBundle();
+  const { makeTagChips } = plugin.__internal;
+  const fakeHost = makeFakeReactHost();
+  const tagId = "tag-6a1aeb09170bfffcfa5e";
+  fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+  fakeHost.storage = {
+    get(scope) {
+      if (scope === "task") return Promise.resolve({ value: [tagId], updatedAt: "legacy-task" });
+      return Promise.resolve({
+        value: [{ id: tagId, name: "stale private name", color: "#6b7280" }],
+        updatedAt: "legacy-catalog",
+      });
+    },
+    subscribe: () => () => {},
+  };
+  const calls = [];
+  let removed = false;
+  fakeHost.api = {
+    invokeAction(key, input) {
+      calls.push({ key, input });
+      if (key === "task-tag-remove") {
+        removed = true;
+        return Promise.resolve({ tags: [] });
+      }
+      return Promise.resolve({
+        tags: [{ id: tagId, name: "Human priority", color: "#ef4444" }],
+        tasks: removed
+          ? {}
+          : {
+              "task-1": [
+                { id: tagId, name: "Human priority", color: "#ef4444", agent: false, agentApplied: false, note: "" },
+              ],
+            },
+      });
+    },
+  };
+
+  const getTree = fakeHost.mount(makeTagChips(fakeHost, { removable: true }), {
+    slotProps: { taskId: "task-1", workspaceId: "ws-1" },
+  });
+  await flush();
+
+  const chips = getTree().children[0];
+  assert.equal(chips.length, 1, "one logical Human application renders one chip");
+  assert.equal(chips[0].children[0], "Human priority", "the canonical shared definition wins");
+  assert.equal(chips[0].props.style.background, "#ef4444");
+  assert.equal(chips[0].props["data-agent"], undefined);
+  assert.equal(chips[0].children[1].props["aria-label"], "Remove tag Human priority");
+
+  chips[0].children[1].props.onClick({ stopPropagation() {} });
+  await flush();
+  assertStructural.deepEqual(calls[1], {
+    key: "task-tag-remove",
+    input: { taskId: "task-1", body: { tagId } },
+  });
+  assert.equal(calls[2].key, "shared-tags", "successful removal refreshes canonical applications");
+  assert.equal(getTree(), null, "the stale private overlap does not reappear after shared removal");
+});
+
+test("shared agent application suppresses a stale raw id on cards and dense rows", async () => {
+  for (const options of [
+    { removable: true, dense: false },
+    { removable: false, dense: true },
+  ]) {
+    const plugin = loadBundle();
+    const { makeTagChips } = plugin.__internal;
+    const fakeHost = makeFakeReactHost();
+    const tagId = "tag-0123456789abcdefabcd";
+    fakeHost.store = { getState: () => ({ workspaces: { activeId: "ws-1" } }) };
+    fakeHost.storage = {
+      get(scope) {
+        if (scope === "task") return Promise.resolve({ value: [tagId], updatedAt: "legacy-task" });
+        return Promise.resolve({ value: [], updatedAt: "legacy-catalog" });
+      },
+      subscribe: () => () => {},
+    };
+    fakeHost.api = {
+      invokeAction() {
+        return Promise.resolve({
+          tags: [{ id: tagId, name: "Needs review", color: "#a855f7", agent: true }],
+          tasks: {
+            "task-1": [
+              {
+                id: tagId,
+                name: "Needs review",
+                color: "#a855f7",
+                agent: true,
+                agentApplied: true,
+                note: "PR is ready",
+              },
+            ],
+          },
+        });
+      },
+    };
+
+    const getTree = fakeHost.mount(makeTagChips(fakeHost, options), {
+      slotProps: { taskId: "task-1", workspaceId: "ws-1" },
+    });
+    await flush();
+
+    const row = getTree();
+    const chips = row.children[0];
+    assert.equal(chips.length, 1, options.dense ? "dense row has one chip" : "card has one chip");
+    assert.equal(chips[0].children[1], "Needs review");
+    assert.equal(chips[0].props["data-agent"], "true");
+    assert.equal(chips[0].props.title, "Needs review — applied by agent: PR is ready");
+    assert.equal(chips[0].props["aria-label"], "Needs review — applied by agent: PR is ready");
+    assert.equal(row.children[1], options.dense ? null : undefined, "no duplicate is counted in dense overflow");
+  }
 });
 
 test("agent status tags render on dense task rows without a remove control and count toward +N", async () => {
