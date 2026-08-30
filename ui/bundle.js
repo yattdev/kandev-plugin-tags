@@ -1161,6 +1161,8 @@
     var jsx = host.jsx;
 
     function chipEl(tag, handleRemove) {
+      var displayNote = typeof tag.note === "string" ? tag.note.trim() : "";
+      var agentLabel = tag.agent ? tag.name + (displayNote ? " — " + displayNote : "") : undefined;
       var spanArgs = [
         "span",
         {
@@ -1169,8 +1171,8 @@
           className: "kandev-tags-chip",
           style: tag.agent ? Object.assign({}, dense ? denseChipStyle(tag.color) : chipStyle(tag.color), { border: "1px dashed currentColor" }) : (dense ? denseChipStyle(tag.color) : chipStyle(tag.color)),
           "data-agent": tag.agent ? "true" : undefined,
-          title: tag.agent ? tag.name + " — " + (tag.agentApplied ? "applied by agent" : "created by agent") + (tag.note ? ": " + tag.note : "") : undefined,
-          "aria-label": tag.agent ? tag.name + " — " + (tag.agentApplied ? "applied by agent" : "created by agent") + (tag.note ? ": " + tag.note : "") : undefined,
+          title: agentLabel,
+          "aria-label": agentLabel,
         },
       ];
       if (tag.agent) spanArgs.push(botIconElement(host));
