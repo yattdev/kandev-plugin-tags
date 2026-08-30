@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.14.1] - 2026-08-30
+
+### Changed
+
+- docs: add tag chip QA screenshots (e2bfe19)
+- test(ui): cover filter-primed tag overlap (dd97916)
+- fix(ui): prevent duplicate raw tag chips (f342a79)
+- fix(ui): handle blank agent tag notes (c8cb4af)
+- fix(ui): simplify agent tag labels (3841df3)
+- fix: bound agent tag task key growth (d7ba7eb)
+- release: 0.14.0 (1c2e1e2)
+
+
 ## [0.14.0] - 2026-08-30
 
 ### Changed
