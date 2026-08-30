@@ -1,7 +1,7 @@
 .PHONY: build run test fmt vet package package-host clean setup check-sdk
 
 BIN := bin/kandev-plugin-tags
-VERSION := 0.13.0
+VERSION := 0.14.0
 STAGE := .build/stage
 PKG_OUT := kandev-plugin-tags-$(VERSION).tar.gz
 

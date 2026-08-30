@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.14.0] - 2026-08-30
+
+### Changed
+
+- docs: clarify orphan tag eviction guarantee (6b3f28c)
+- qa: protect human-applied tags from eviction by an invented task_id (1e9a58c)
+- feat: let agent tag tools target another task (b755410)
+
+
 ## [Unreleased]
 
 ### Added
