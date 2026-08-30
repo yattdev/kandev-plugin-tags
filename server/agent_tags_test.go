@@ -130,7 +130,7 @@ func TestLegacyAgentStatusDocumentMigratesOnNextWrite(t *testing.T) {
 	require.Len(t, doc.Tags, 2)
 }
 
-func TestMutationsAreSerializedAndCapTaskDocuments(t *testing.T) {
+func TestMutationsAreSerializedAndRejectNewAgentTaskAtCap(t *testing.T) {
 	p, host := newAgentTagTestPlugin()
 	id := agentCreate(t, p, "Concurrent")
 	var wg sync.WaitGroup
@@ -158,12 +158,14 @@ func TestMutationsAreSerializedAndCapTaskDocuments(t *testing.T) {
 	req := agentToolReq("add_tag", map[string]any{"tag_id": id})
 	req.Context.WorkspaceID = "ws-cap"
 	req.Context.TaskID = "new"
-	_, err = p.InvokeAgentTool(context.Background(), req)
+	result, err := p.InvokeAgentTool(context.Background(), req)
 	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Equal(t, fmt.Sprintf("workspace tag task capacity is %d; remove a task tag before targeting a new task", tagTaskCap), result.Text)
 	capDoc := storedTagDoc(t, host, "ws-cap")
 	require.Len(t, capDoc.Tasks, tagTaskCap)
-	require.NotContains(t, capDoc.Tasks, "old-000")
-	require.Contains(t, capDoc.Tasks, "new")
+	require.Contains(t, capDoc.Tasks, "old-000")
+	require.NotContains(t, capDoc.Tasks, "new")
 }
 
 // The optional task_id argument lets an agent (typically a coordinator) tag a
@@ -318,36 +320,107 @@ func TestTargetedTagWritesStayInsideCallerWorkspace(t *testing.T) {
 	require.Contains(t, storedTagDoc(t, host, "ws-1").Tasks, "task-other")
 }
 
-// Regression (QA): targetTaskID lets an agent name any task id, so a mistyped
-// or invented target lands in doc.Tasks stamped with now(). Under a plain
-// oldest-first cap that made the bogus entry the last survivor and evicted a
-// real card's human-applied tags instead. Eviction must discard entries no
-// human has curated first.
-func TestCapEvictsUncuratedEntriesBeforeHumanAppliedOnes(t *testing.T) {
+// Regression (QA): after 210 invented task-id attempts against the 200-task
+// cap, neither a real human-applied task nor a real agent-applied task may be
+// evicted. New agent-created keys fill the remaining slots, then fail closed
+// without mutating the workspace document.
+func TestQA_CapPressureFromOrphans(t *testing.T) {
 	p, host := newAgentTagTestPlugin()
-	_, err := p.HandleAction(context.Background(), actionReq("tag-create", []byte(`{"name":"Human","color":"#ef4444"}`)))
-	require.NoError(t, err)
-	humanID := storedTagDoc(t, host, "ws-1").Tags[0].ID
-	agentID := agentCreate(t, p, "Agent")
+	id := agentCreate(t, p, "Spam")
 
 	doc := storedTagDoc(t, host, "ws-1")
-	for i := 0; i < tagTaskCap; i++ {
-		doc.Tasks[fmt.Sprintf("real-%03d", i)] = []taskTag{{TagID: humanID, Human: true, UpdatedAt: "2020-01-01T00:00:00Z"}}
-	}
+	doc.Tasks["real-human-task"] = []taskTag{{TagID: id, Human: true, UpdatedAt: "2000-01-01T00:00:00Z"}}
+	doc.Tasks["real-agent-task"] = []taskTag{{TagID: id, Agent: true, UpdatedAt: "2000-01-01T00:00:00Z"}}
 	raw, err := encodeTagDoc(doc)
 	require.NoError(t, err)
 	require.NoError(t, host.SetState(context.Background(), "workspace", "ws-1", tagStateKey, raw))
 
-	// An agent targets a task id that does not exist.
-	res, err := p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{"tag_id": agentID, "task_id": "typo-does-not-exist"}))
-	require.NoError(t, err)
-	require.False(t, res.IsError, res.Text)
+	admitted, rejected := 0, 0
+	var fullBeforeRejections tagDoc
+	for i := 0; i < tagTaskCap+10; i++ {
+		if i == tagTaskCap-2 {
+			fullBeforeRejections = storedTagDoc(t, host, "ws-1")
+		}
+		res, err := p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{
+			"tag_id":  id,
+			"task_id": fmt.Sprintf("ghost-%04d", i),
+		}))
+		require.NoError(t, err)
+		if res.IsError {
+			rejected++
+			require.Equal(t, fmt.Sprintf("workspace tag task capacity is %d; remove a task tag before targeting a new task", tagTaskCap), res.Text)
+			continue
+		}
+		admitted++
+	}
 
-	after := storedTagDoc(t, host, "ws-1").Tasks
-	require.Len(t, after, tagTaskCap)
-	require.NotContains(t, after, "typo-does-not-exist", "the uncurated entry is evicted, not kept")
+	require.Equal(t, tagTaskCap-2, admitted)
+	require.Equal(t, 12, rejected)
+	after := storedTagDoc(t, host, "ws-1")
+	require.Len(t, after.Tasks, tagTaskCap)
+	require.Equal(t, fullBeforeRejections, after, "rejected attempts must not mutate the stored document")
+	require.True(t, after.Tasks["real-human-task"][0].Human)
+	require.True(t, after.Tasks["real-agent-task"][0].Agent)
+	for i := tagTaskCap - 2; i < tagTaskCap+10; i++ {
+		require.NotContains(t, after.Tasks, fmt.Sprintf("ghost-%04d", i), "rejected target must not be persisted")
+	}
+}
+
+func TestAgentCanUpdateExistingTasksAtCapAndReuseFreedSlot(t *testing.T) {
+	p, host := newAgentTagTestPlugin()
+	id := agentCreate(t, p, "Capacity")
+
+	doc := storedTagDoc(t, host, "ws-1")
+	for i := 0; i < tagTaskCap-2; i++ {
+		doc.Tasks[fmt.Sprintf("peer-%03d", i)] = []taskTag{{TagID: id, Agent: true, UpdatedAt: "2020-01-01T00:00:00Z"}}
+	}
+	doc.Tasks["task-1"] = []taskTag{{TagID: id, Agent: true, Note: "old self", UpdatedAt: "2020-01-01T00:00:00Z"}}
+	doc.Tasks["task-other"] = []taskTag{{TagID: id, Agent: true, Note: "old target", UpdatedAt: "2020-01-01T00:00:00Z"}}
+	raw, err := encodeTagDoc(doc)
+	require.NoError(t, err)
+	require.NoError(t, host.SetState(context.Background(), "workspace", "ws-1", tagStateKey, raw))
+
+	self, err := p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{"tag_id": id, "note": "new self"}))
+	require.NoError(t, err)
+	require.False(t, self.IsError, self.Text)
+	targeted, err := p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{"tag_id": id, "task_id": "task-other", "note": "new target"}))
+	require.NoError(t, err)
+	require.False(t, targeted.IsError, targeted.Text)
+	afterUpdates := storedTagDoc(t, host, "ws-1")
+	require.Len(t, afterUpdates.Tasks, tagTaskCap)
+	require.Equal(t, "new self", afterUpdates.Tasks["task-1"][0].Note)
+	require.Equal(t, "new target", afterUpdates.Tasks["task-other"][0].Note)
+	require.Contains(t, afterUpdates.Tasks, "peer-000", "existing-key updates must not evict a peer")
+
+	removed, err := p.InvokeAgentTool(context.Background(), agentToolReq("remove_tag", map[string]any{"tag_id": id, "task_id": "task-other"}))
+	require.NoError(t, err)
+	require.False(t, removed.IsError, removed.Text)
+	require.Len(t, storedTagDoc(t, host, "ws-1").Tasks, tagTaskCap-1)
+
+	added, err := p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{"tag_id": id, "task_id": "task-new"}))
+	require.NoError(t, err)
+	require.False(t, added.IsError, added.Text)
+	afterReuse := storedTagDoc(t, host, "ws-1")
+	require.Len(t, afterReuse.Tasks, tagTaskCap)
+	require.Contains(t, afterReuse.Tasks, "task-new")
+}
+
+// Generic over-cap cleanup still discards an uncurated task before any task a
+// human has curated. Agent add_tag no longer reaches this cleanup when a new
+// target arrives at capacity; human actions and decoded state still can.
+func TestCapEvictsUncuratedEntriesBeforeHumanAppliedOnes(t *testing.T) {
+	p := &tagsPlugin{}
+	doc := newTagDoc()
 	for i := 0; i < tagTaskCap; i++ {
-		require.Contains(t, after, fmt.Sprintf("real-%03d", i), "no human-applied entry may be displaced")
+		doc.Tasks[fmt.Sprintf("real-%03d", i)] = []taskTag{{TagID: "human", Human: true, UpdatedAt: "2020-01-01T00:00:00Z"}}
+	}
+	doc.Tasks["uncurated"] = []taskTag{{TagID: "agent", Agent: true, UpdatedAt: "2030-01-01T00:00:00Z"}}
+	p.capTagTasks(&doc)
+
+	require.Len(t, doc.Tasks, tagTaskCap)
+	require.NotContains(t, doc.Tasks, "uncurated", "uncurated entry is evicted even though it is newest")
+	for i := 0; i < tagTaskCap; i++ {
+		require.Contains(t, doc.Tasks, fmt.Sprintf("real-%03d", i), "no human-applied entry may be displaced")
 	}
 }
 
@@ -356,22 +429,15 @@ func TestCapEvictsUncuratedEntriesBeforeHumanAppliedOnes(t *testing.T) {
 func TestCapEvictionIsDeterministicOnTiedTimestamps(t *testing.T) {
 	victims := map[string]int{}
 	for run := 0; run < 8; run++ {
-		p, host := newAgentTagTestPlugin()
-		id := agentCreate(t, p, "Tied")
-		doc := storedTagDoc(t, host, "ws-1")
-		for i := 0; i < tagTaskCap; i++ {
-			doc.Tasks[fmt.Sprintf("tied-%03d", i)] = []taskTag{{TagID: id, Agent: true, UpdatedAt: "2026-01-01T00:00:00Z"}}
+		p := &tagsPlugin{}
+		doc := newTagDoc()
+		for i := 0; i <= tagTaskCap; i++ {
+			doc.Tasks[fmt.Sprintf("tied-%03d", i)] = []taskTag{{TagID: "agent", Agent: true, UpdatedAt: "2026-01-01T00:00:00Z"}}
 		}
-		raw, err := encodeTagDoc(doc)
-		require.NoError(t, err)
-		require.NoError(t, host.SetState(context.Background(), "workspace", "ws-1", tagStateKey, raw))
-
-		_, err = p.InvokeAgentTool(context.Background(), agentToolReq("add_tag", map[string]any{"tag_id": id, "task_id": "newcomer"}))
-		require.NoError(t, err)
-		after := storedTagDoc(t, host, "ws-1").Tasks
-		require.Len(t, after, tagTaskCap)
-		for i := 0; i < tagTaskCap; i++ {
-			if key := fmt.Sprintf("tied-%03d", i); !containsKey(after, key) {
+		p.capTagTasks(&doc)
+		require.Len(t, doc.Tasks, tagTaskCap)
+		for i := 0; i <= tagTaskCap; i++ {
+			if key := fmt.Sprintf("tied-%03d", i); !containsKey(doc.Tasks, key) {
 				victims[key]++
 			}
 		}

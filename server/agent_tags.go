@@ -257,13 +257,12 @@ func (p *tagsPlugin) mutateTagDoc(ctx context.Context, workspaceID string, mutat
 	return doc, nil
 }
 
-// capTagTasks bounds the per-workspace document. Eviction prefers entries no
-// human has curated: targetTaskID accepts any task id an agent supplies, so a
-// mistyped or invented target must not be able to displace a person's tags --
-// it is stamped with now(), which under a plain oldest-first rule would make it
-// the last survivor rather than the first casualty. Within a class the oldest
-// entry goes first, and the task id breaks ties so eviction is deterministic
-// instead of following Go's randomized map iteration order.
+// capTagTasks is the general bound for mutations that can produce an over-cap
+// document, including human actions and migrated state. Eviction prefers
+// entries no human has curated. Within a class the oldest entry goes first,
+// and the task id breaks ties so eviction is deterministic instead of following
+// Go's randomized map iteration order. Agent add_tag applies the stricter
+// ensureAgentTaskSlot admission rule before it can create an over-cap document.
 func (p *tagsPlugin) capTagTasks(doc *tagDoc) {
 	for len(doc.Tasks) > tagTaskCap {
 		var victimID, victimOldest string
@@ -284,6 +283,16 @@ func (p *tagsPlugin) capTagTasks(doc *tagDoc) {
 		}
 		delete(doc.Tasks, victimID)
 	}
+}
+
+// ensureAgentTaskSlot prevents an agent-created task key from driving eviction
+// against existing cards. Existing targets remain writable at capacity; a new
+// target is admitted only while the workspace document has a free task slot.
+func ensureAgentTaskSlot(doc tagDoc, taskID string) error {
+	if _, exists := doc.Tasks[taskID]; exists || len(doc.Tasks) < tagTaskCap {
+		return nil
+	}
+	return fmt.Errorf("workspace tag task capacity is %d; remove a task tag before targeting a new task", tagTaskCap)
 }
 
 // evictBefore reports whether the task entry described by (human, oldest, id)
@@ -323,10 +332,10 @@ func requireToolContext(req *pluginsdk.AgentToolRequest) string {
 // the caller's own workspace document, so a target can only ever address a task
 // in that workspace, and the deleteTag cascade still clears every key.
 //
-// The residual cost is a wasted slot, not lost data. An entry for a task that
-// does not exist renders on no card but does occupy one of the tagTaskCap
-// slots, so capTagTasks -- not this function -- is what keeps an invented id
-// from displacing a real card's tags; see the eviction ordering there.
+// An entry for a task that does not exist renders on no card and occupies one
+// of the tagTaskCap slots. Unknown IDs remain accepted while capacity is
+// available; ensureAgentTaskSlot rejects a new key at the cap so an invented ID
+// cannot evict an existing card's agent- or human-applied tags.
 func targetTaskID(req *pluginsdk.AgentToolRequest) string {
 	if id := strings.TrimSpace(agentArgString(req, "task_id")); id != "" {
 		return id
@@ -478,6 +487,9 @@ func (p *tagsPlugin) InvokeAgentTool(ctx context.Context, req *pluginsdk.AgentTo
 		note := truncateNote(agentArgString(req, "note"))
 		doc, err := p.mutateTagDoc(ctx, req.Context.WorkspaceID, func(doc *tagDoc) error {
 			if _, err := requireAgentOwnedTag(*doc, id); err != nil {
+				return err
+			}
+			if err := ensureAgentTaskSlot(*doc, taskID); err != nil {
 				return err
 			}
 			entries := doc.Tasks[taskID]
