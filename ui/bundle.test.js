@@ -1361,6 +1361,82 @@ test("first-load 503 stays on the shared error path and destroy cancels its retr
   assert.equal(timers.size, 0, "destroy cancels an update retry");
 });
 
+test("a late 503 after destroy cannot revive an obsolete shared-tag retry", async () => {
+  let nextTimer = 1;
+  const timers = new Map();
+  let rejectAction;
+  const plugin = loadBundle(null, {
+    setTimeout(fn, delay) {
+      const id = nextTimer++;
+      timers.set(id, { fn, delay });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+  });
+  const host = {
+    api: {
+      invokeAction() {
+        return new Promise((resolve, reject) => {
+          rejectAction = reject;
+        });
+      },
+    },
+  };
+
+  const pendingRead = plugin.__internal.fetchSharedTags(host, "ws-1");
+  plugin.destroy();
+  rejectAction(apiError(503, "plugin is not active"));
+  await pendingRead;
+
+  assert.equal(timers.size, 0, "a settled read from the destroyed generation cannot schedule a retry");
+});
+
+test("a late 503 from before re-entrant initialize cannot schedule alongside the new generation", async () => {
+  let nextTimer = 1;
+  const timers = new Map();
+  const requests = [];
+  const plugin = loadBundle(null, {
+    setTimeout(fn, delay) {
+      const id = nextTimer++;
+      timers.set(id, { fn, delay });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+  });
+  const host = {
+    React: null,
+    jsx() { return {}; },
+    store: {
+      getState: () => ({}),
+      subscribe: () => () => {},
+    },
+    api: {
+      invokeAction() {
+        return new Promise((resolve, reject) => requests.push({ resolve, reject }));
+      },
+    },
+  };
+
+  const obsoleteRead = plugin.__internal.fetchSharedTags(host, "ws-1");
+  plugin.initialize(makeFullRegistry(), host);
+  const liveRead = plugin.__internal.fetchSharedTags(host, "ws-1");
+  assert.equal(requests.length, 2);
+
+  requests[0].reject(apiError(503, "plugin is not active"));
+  await obsoleteRead;
+  assert.equal(timers.size, 0, "the old generation cannot add a retry after re-initialization");
+
+  requests[1].reject(apiError(503, "plugin is not active"));
+  await liveRead;
+  assert.equal(timers.size, 1, "only the live generation owns the bounded retry");
+  plugin.destroy();
+  assert.equal(timers.size, 0);
+});
+
 test("non-404 client errors remain shared load errors without immediate retry", async () => {
   const plugin = loadBundle();
   const { fetchSharedTags, getSharedTagStore, sharedTagsEnabled } = plugin.__internal;

@@ -772,6 +772,11 @@
   var sharedTagStores = {};
   var sharedTagRefreshTimer = null;
   var sharedTagLoadErrorLogged = false;
+  // Incremented whenever initialize()/destroy() drops the shared stores. A
+  // request cannot be cancelled once invokeAction has started, so its later
+  // settlement must prove it still belongs to the live store generation
+  // before it can notify, mutate state, or schedule another retry.
+  var sharedTagLifecycleGeneration = 0;
 
   function makeStore() {
     return {
@@ -949,12 +954,13 @@
     if (store) clearSharedTagRetry(store, true);
   }
 
-  function scheduleSharedTagRetry(host, workspaceId) {
-    var store = getSharedTagStore(workspaceId);
+  function scheduleSharedTagRetry(host, workspaceId, store, lifecycleGeneration) {
+    if (sharedTagLifecycleGeneration !== lifecycleGeneration || sharedTagStores[workspaceId] !== store) return;
     if (store.unavailable || store.retryTimer !== null || store.retryAttempt >= SHARED_ACTION_RETRY_DELAYS.length) return;
     var delay = SHARED_ACTION_RETRY_DELAYS[store.retryAttempt];
     store.retryAttempt += 1;
     store.retryTimer = setTimeout(function () {
+      if (sharedTagLifecycleGeneration !== lifecycleGeneration || sharedTagStores[workspaceId] !== store) return;
       store.retryTimer = null;
       fetchSharedTags(host, workspaceId);
     }, delay);
@@ -962,6 +968,7 @@
 
   function fetchSharedTags(host, workspaceId) {
     var store = getSharedTagStore(workspaceId);
+    var lifecycleGeneration = sharedTagLifecycleGeneration;
     if (!host.api || typeof host.api.invokeAction !== "function") {
       clearSharedTagRetry(store, true);
       store.unavailable = true; store.value = { tags: [], tasks: {} }; store.loaded = true; store.error = null; store.hasValue = false; notifyStoreListeners(store);
@@ -974,6 +981,10 @@
     store.dirty = false;
 
     function settle(apply, retryable) {
+      // destroy() and a re-entrant initialize() both discard the shared
+      // stores. Do not let an action started before that boundary revive an
+      // obsolete retry timer after it finally resolves or rejects.
+      if (sharedTagLifecycleGeneration !== lifecycleGeneration || sharedTagStores[workspaceId] !== store) return;
       store.inFlight = null;
       apply();
       store.loaded = true;
@@ -981,7 +992,7 @@
       if (store.dirty) {
         fetchSharedTags(host, workspaceId);
       } else if (retryable) {
-        scheduleSharedTagRetry(host, workspaceId);
+        scheduleSharedTagRetry(host, workspaceId, store, lifecycleGeneration);
       }
     }
 
@@ -1166,6 +1177,7 @@
    * see initialize's own comment) need this.
    */
   function resetSharedStores() {
+    sharedTagLifecycleGeneration += 1;
     catalogStores = {};
     clearTaskTagCache();
     taskTagWideUnsubscribe = null;
