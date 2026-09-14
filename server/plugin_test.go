@@ -43,8 +43,11 @@ func TestTagsPlugin_HostRoundTrip(t *testing.T) {
 // fakeHost is an in-memory pluginsdk.Host stand-in for backend tests.
 type fakeHost struct {
 	pluginsdk.UnimplementedHostData
-	mu    sync.Mutex
-	state map[string]map[string]any
+	mu          sync.Mutex
+	state       map[string]map[string]any
+	getCalls    int
+	setCalls    int
+	deleteCalls int
 }
 
 func stateKey(scope, scopeID, key string) string {
@@ -69,6 +72,7 @@ func cloneMap(value map[string]any) map[string]any {
 func (h *fakeHost) GetState(_ context.Context, scope, scopeID, key string) (map[string]any, bool, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.getCalls++
 	if h.state == nil {
 		return nil, false, nil
 	}
@@ -78,6 +82,7 @@ func (h *fakeHost) GetState(_ context.Context, scope, scopeID, key string) (map[
 func (h *fakeHost) SetState(_ context.Context, scope, scopeID, key string, value map[string]any) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.setCalls++
 	if h.state == nil {
 		h.state = map[string]map[string]any{}
 	}
@@ -87,9 +92,17 @@ func (h *fakeHost) SetState(_ context.Context, scope, scopeID, key string, value
 func (h *fakeHost) DeleteState(_ context.Context, scope, scopeID, key string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.deleteCalls++
 	delete(h.state, stateKey(scope, scopeID, key))
 	return nil
 }
+
+func (h *fakeHost) stateCallCounts() (gets, sets, deletes int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.getCalls, h.setCalls, h.deleteCalls
+}
+
 func (h *fakeHost) ListState(context.Context, string, string) ([]pluginsdk.StateEntry, error) {
 	return nil, nil
 }
