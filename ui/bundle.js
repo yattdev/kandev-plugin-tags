@@ -12,7 +12,11 @@
  *     for the sidebar task row and the `/tasks` list row;
  *   - a registerTaskMenuAction under the kanban card's "primary" group
  *     ("Add tag...") that opens a redesigned host.openModal editor
- *     (TagPickerModal) to search/create and multi-select tags for the card;
+ *     (TagPickerModal) to search/create and multi-select tags for the card.
+ *     On a host that renders plugin submenus it becomes that editor plus a
+ *     quick list -- "More tags..." first, then the workspace's latest-used
+ *     tags, one click each (see quickTagItems); a host that predates the
+ *     submenu field still renders the flat item and calls run;
  *   - a "main-top-bar" slot button ("Tags box") that opens a
  *     filter+manage dropdown (TagsTopBarDropdown) to add/rename/recolor/
  *     remove tags from the user's tag catalog: an icon-lg trigger, a
@@ -139,6 +143,10 @@
   var UNTAGGED_FILTER_VALUE = "__untagged__";
   var TAGS_FILTER_ID = "tags";
   var TASK_ROW_CHIP_LIMIT = 3;
+  // How many recently used workspace tags the card menu's "Add tag..." submenu
+  // offers below its "More tags..." entry. The list is a shortcut, not a
+  // second catalog: the picker behind "More tags..." still shows every tag.
+  var QUICK_TAG_LIMIT = 5;
 
   // Shapes of generated catalog tag ids -- used by resolveTag to distinguish
   // an *orphaned* v2 tag id (deleted from the catalog but still referenced by
@@ -1048,6 +1056,13 @@
   var sharedTagStores = newIdMap(); // workspaceId -> store; see newIdMap
   var sharedTagRefreshTimer = null;
   var sharedTagLoadErrorLogged = false;
+  // "workspaceId|taskId" -> { shared, private, items }: quickTagItems'
+  // derived card-menu list, keyed by the two store values it was derived
+  // from. The host builds a card's menu entries on every render, menus open or
+  // closed, so without this the scan plus sort behind each list would run for
+  // every card on every board render. Dropped with the stores
+  // (see resetSharedStores).
+  var quickTagCaches = {};
   // Incremented whenever initialize()/destroy() drops the shared stores. A
   // request cannot be cancelled once invokeAction has started, so its later
   // settlement must prove it still belongs to the live store generation
@@ -1297,12 +1312,44 @@
     }, delay);
   }
 
+  /**
+   * Replaces a shared store's payload and releases every memoized quick list
+   * built from the one it had. The memo's own identity check is only an
+   * invalidation trigger -- this is what stops the old payload (every task's
+   * applications, its tag objects, the run closures) from staying reachable
+   * through a card whose menu is never built again.
+   */
+  function setSharedValue(store, value) {
+    store.value = value;
+    pruneQuickTagCaches(store);
+  }
+
+  /**
+   * Drops every memoized quick list built from a payload the shared store has
+   * since replaced. Without this, an entry for a card whose menu is not built
+   * again would keep that whole-workspace payload reachable for the life of
+   * the page -- one refresh every 30 seconds is enough for the cache to pin a
+   * generation that nothing else references. Entries this store's current
+   * payload still backs stay (another workspace's refresh drops them early,
+   * which costs one recompute and is the safe direction).
+   */
+  function pruneQuickTagCaches(store) {
+    Object.keys(quickTagCaches).forEach(function (key) {
+      if (quickTagCaches[key].shared !== store.value) delete quickTagCaches[key];
+    });
+  }
+
   function fetchSharedTags(host, workspaceId) {
     var store = getSharedTagStore(workspaceId);
     var lifecycleGeneration = sharedTagLifecycleGeneration;
     if (!host.api || typeof host.api.invokeAction !== "function") {
       clearSharedTagRetry(store, true);
-      store.unavailable = true; store.value = emptySharedValue(); store.loaded = true; store.error = null; store.hasValue = false; notifyStoreListeners(store);
+      store.unavailable = true;
+      setSharedValue(store, emptySharedValue());
+      store.loaded = true;
+      store.error = null;
+      store.hasValue = false;
+      notifyStoreListeners(store);
       return Promise.resolve();
     }
     if (store.inFlight) {
@@ -1332,7 +1379,7 @@
         settle(function () {
           clearSharedTagRetry(store, true);
           store.unavailable = false;
-          store.value = sanitizeSharedTags(payload);
+          setSharedValue(store, sanitizeSharedTags(payload));
           store.error = null;
           store.hasValue = true;
           sharedTagLoadErrorLogged = false;
@@ -1345,7 +1392,7 @@
           if (unsupported) {
             clearSharedTagRetry(store, true);
             store.unavailable = true;
-            store.value = emptySharedValue();
+            setSharedValue(store, emptySharedValue());
             store.error = null;
             store.hasValue = false;
           } else {
@@ -1526,6 +1573,9 @@
       clearPrivateReadRetry(taskTagStores[taskId], true);
     });
     taskTagStores = newIdMap();
+    // Every memoized quick list is derived from one of those task stores (and
+    // the shared payload it was built with), so dropping the stores drops them.
+    quickTagCaches = {};
   }
 
   /**
@@ -1557,6 +1607,7 @@
     sharedTagStores = newIdMap();
     sharedTagRefreshTimer = null;
     sharedTagLoadErrorLogged = false;
+    quickTagCaches = {};
   }
 
   // ---------------------------------------------------------------------
@@ -2028,13 +2079,221 @@
     };
   }
 
+  // ---------------------------------------------------------------------
+  // Card-menu quick pick (the "Add tag..." submenu's children)
+  // ---------------------------------------------------------------------
+
+  /** Opens the full picker modal: the menu's flat behavior on a host that
+   * predates submenus, and its "More tags..." child on one that renders them. */
+  function openTagPicker(host, taskId, workspaceId) {
+    return host.openModal({
+      title: "Tags",
+      size: "md",
+      content: makeTagPickerModal(host, taskId, workspaceId),
+    });
+  }
+
+  /**
+   * Applies one tag from the menu's quick list, mirroring the picker's apply
+   * branch: the shared action is the only write path, since the quick list
+   * exists only where the shared store does. Refreshes that store, which is
+   * what every chip row reads. A failure toasts as well as logs -- a menu
+   * click has no inline error surface the way the picker modal does.
+   */
+  function applyQuickTag(host, workspaceId, taskId, tagId) {
+    return host.api
+      .invokeAction("task-tag-add", { taskId: taskId, body: { tagId: tagId } })
+      .then(function () {
+        return fetchSharedTags(host, workspaceId);
+      })
+      .catch(function (err) {
+        logError("add tag from card menu", err);
+        if (host.toast && typeof host.toast.error === "function") {
+          host.toast.error("Could not add tag. Please try again.");
+        }
+      });
+  }
+
+  /**
+   * The last time a tag was applied anywhere in the workspace, in
+   * milliseconds, from one application's `updatedAt`.
+   *
+   * The writer is Go's `time.RFC3339Nano`, which trims trailing zeros and may
+   * carry more than three fractional digits, so the raw strings are not
+   * comparable: as strings `...T00:00:00Z` sorts *after* `...T00:00:00.5Z`,
+   * which is backwards. Truncating the fraction to milliseconds makes every
+   * value a spec-shaped date string for `Date.parse` (engines are only
+   * required to accept three fractional digits) that is still far finer than
+   * the ordering a five-entry list needs; equal milliseconds fall back to
+   * catalog order. Null for a missing or unparseable value, which the caller
+   * treats as "never used".
+   */
+  function lastUsedMillis(at) {
+    if (typeof at !== "string" || at === "") return null;
+    var parsed = Date.parse(at.replace(/\.(\d{3})\d+/, ".$1"));
+    return isNaN(parsed) ? null : parsed;
+  }
+
+  /**
+   * The quick list's entries are created by these factories rather than inline.
+   * A closure created directly inside quickTagItems would share that call's
+   * variable context -- which holds the workspace-wide application map it just
+   * scanned -- and the host keeps these callbacks alive inside the menu entries
+   * it holds, so the payload the memo released would stay reachable through
+   * them. Each factory closes over its own arguments only, and the head entry
+   * is only built when there is a list to head (see quickTagItems).
+   */
+  function quickTagRun(host, workspaceId, taskId, tagId) {
+    return function () {
+      return applyQuickTag(host, workspaceId, taskId, tagId);
+    };
+  }
+
+  function quickTagColorIcon(host, tag) {
+    // Shared catalog values cross the plugin boundary; accept only the
+    // supported hex forms before using them as inline CSS.
+    var color = normalizeColor(tag.color) || colorFromName(tag.name);
+    return host.jsx("span", {
+      "data-testid": "kandev-tags-quick-pick-color",
+      "aria-hidden": "true",
+      style: {
+        display: "inline-block",
+        width: "8px",
+        height: "8px",
+        flexShrink: 0,
+        marginRight: "8px",
+        borderRadius: "50%",
+        backgroundColor: color,
+      },
+    });
+  }
+
+  function moreTagsEntry(host, workspaceId, taskId) {
+    return {
+      id: "more",
+      label: "More tags\u2026",
+      run: function () {
+        return openTagPicker(host, taskId, workspaceId);
+      },
+    };
+  }
+
+  /**
+   * The children of the card menu's "Add tag..." entry on a host that renders
+   * plugin submenus: "More tags..." first (the picker modal), then the tags
+   * this workspace applied most recently, newest first, capped at
+   * QUICK_TAG_LIMIT.
+   *
+   * Everything here is derived from state the chip rows already keep warm:
+   * the shared store holds every task's applications with the timestamp of
+   * each last add by an agent or a person, so "latest used" is a scan of data
+   * already in memory. A tag nothing has ever been applied with has no place
+   * in a most-recently-used list and is left to the picker.
+   *
+   * This runs on the host's menu-build path -- once per card per board render
+   * with this feature's host half (twice before its perf commit, which shares
+   * one evaluation between a card's dropdown and context variants), menus open
+   * or closed -- so it must stay synchronous and read-only (the host's own
+   * `items` contract), and its result is cached
+   * until one of the two stores it reads replaces its value (see
+   * quickTagCaches), empty results included. A store that has not loaded yet
+   * therefore yields an empty list -- the host's signal for "no usable
+   * children", which renders the action's flat item -- and this path never
+   * fetches.
+   *
+   * Only tags the card does not already carry are offered, so every child
+   * adds exactly the tag it names: removal stays where it has always been, on
+   * the card's own chips and in the picker.
+   */
+  function quickTagItems(host, context) {
+    var workspaceId = resolveWorkspaceId(host, context.workspaceId);
+    if (!workspaceId || !sharedTagsEnabled(host, workspaceId)) return [];
+
+    var store = getSharedTagStore(workspaceId);
+    var taskStore = getTaskTagStore(context.taskId);
+    var cacheKey = workspaceId + "|" + context.taskId;
+    var cached = quickTagCaches[cacheKey];
+    // Both stores replace their value wholesale on every fetch, so identity
+    // is a sound invalidation key for everything derived below.
+    if (cached && cached.shared === store.value && cached.private === taskStore.value) {
+      return cached.items;
+    }
+
+    var tasks = store.value.tasks || {};
+    var applied = {};
+    (tasks[context.taskId] || []).forEach(function (entry) {
+      if (entry && typeof entry.id === "string") applied[entry.id] = true;
+    });
+    (taskStore.value || []).forEach(function (id) {
+      applied[id] = true;
+    });
+
+    var lastUsedAt = {};
+    Object.keys(tasks).forEach(function (taskId) {
+      (tasks[taskId] || []).forEach(function (entry) {
+        if (!entry || typeof entry.id !== "string") return;
+        var at = lastUsedMillis(entry.updatedAt);
+        if (at === null) return;
+        if (lastUsedAt[entry.id] === undefined || at > lastUsedAt[entry.id]) lastUsedAt[entry.id] = at;
+      });
+    });
+
+    // A catalog payload carrying the same id twice would otherwise produce
+    // two children with one host React key -- the server's own ids are 80
+    // random bits, so this is defence in depth, not a reachable state.
+    var seen = {};
+    var quick = (store.value.tags || [])
+      .filter(function (tag) {
+        if (applied[tag.id] || lastUsedAt[tag.id] === undefined || seen[tag.id]) return false;
+        seen[tag.id] = true;
+        return true;
+      })
+      .map(function (tag, order) {
+        return { tag: tag, at: lastUsedAt[tag.id], order: order };
+      })
+      .sort(function (a, b) {
+        return a.at === b.at ? a.order - b.order : b.at - a.at;
+      })
+      .slice(0, QUICK_TAG_LIMIT)
+      .map(function (candidate, index) {
+        var tagId = candidate.tag.id;
+        return {
+          id: tagId,
+          label: candidate.tag.name,
+          icon: quickTagColorIcon(host, candidate.tag),
+          separatorBefore: index === 0,
+          run: quickTagRun(host, workspaceId, context.taskId, tagId),
+        };
+      });
+
+    // Nothing recent to offer -- a fresh workspace has no applications at all,
+    // and a card can already carry every tag anyone applied. An empty list is
+    // the host's "no usable children" signal, so the action stops being a
+    // submenu and renders its flat item (label, and `run` opening this same
+    // picker): one click, and the command palette keeps its entry. Returning a
+    // lone "More tags..." child would nest that picker one level deeper for
+    // nothing.
+    // An empty list is cached like any other: "nothing to offer" is a stable
+    // state on this hot path, not a transient one. The head entry is built only
+    // on the branch that needs it, so a cache hit builds no entry at all -- the
+    // composite cache key above is still built, on every call.
+    var items =
+      quick.length === 0
+        ? []
+        : [moreTagsEntry(host, workspaceId, context.taskId)].concat(quick);
+    quickTagCaches[cacheKey] = { shared: store.value, private: taskStore.value, items: items };
+    return items;
+  }
+
   /**
    * The add-tag menu item's icon -- @tabler/icons-react's IconTag geometry,
    * inlined (host.ui exposes no icon set) at the same `mr-2 h-4 w-4`,
    * stroke="currentColor" sizing every neighbouring item in the same menu
-   * uses (`Move to`/`Archive`/`Delete`), so it lines up pixel-for-pixel. The
-   * renderer emits `entry.icon` bare and applies no sizing of its own, so
-   * the plugin must own the className.
+   * uses (`Move to`/`Archive`/`Delete`), so it lines up pixel-for-pixel. It
+   * is a ready-made element rather than a curated icon name or a component:
+   * the host's menu entry passes an element through untouched -- and is the
+   * only icon shape a host predating that resolution renders at all -- so
+   * the plugin owns the className in every case.
    */
   function tagIconElement(host) {
     return host.jsx(
@@ -3424,12 +3683,17 @@
         // Flat, top-level item between "Move to"/"Send to workflow" and
         // "Link" -- shipped in kdlbs/kandev PR #2351.
         group: "primary",
+        // A host that renders plugin submenus (TaskMenuActionRegistration.items)
+        // turns this item into the quick list: "More tags..." (this picker)
+        // plus the workspace's latest-used tags, one click each. A host that
+        // predates the field ignores it entirely and calls run, so the item
+        // behaves exactly as it did before -- which is also why run stays
+        // here rather than living only inside the submenu's first child.
+        items: function (context) {
+          return quickTagItems(host, context);
+        },
         run: function (context) {
-          return host.openModal({
-            title: "Tags",
-            size: "md",
-            content: makeTagPickerModal(host, context.taskId, context.workspaceId),
-          });
+          return openTagPicker(host, context.taskId, context.workspaceId);
         },
       });
 
@@ -3476,6 +3740,7 @@
       logError: logError,
       resolveWorkspaceId: resolveWorkspaceId,
       setTaskTagCache: setTaskTagCache,
+      clearTaskTagCache: clearTaskTagCache,
       readModifyWrite: readModifyWrite,
       sanitizeTagIdList: sanitizeTagIdList,
       sanitizeCatalog: sanitizeCatalog,
@@ -3501,6 +3766,12 @@
       TAGS_FILTER_ID: TAGS_FILTER_ID,
       makeTagChips: makeTagChips,
       makeTagPickerModal: makeTagPickerModal,
+      quickTagItems: quickTagItems,
+      applyQuickTag: applyQuickTag,
+      quickTagCacheSize: function () {
+        return Object.keys(quickTagCaches).length;
+      },
+      QUICK_TAG_LIMIT: QUICK_TAG_LIMIT,
       makeTagsTopBarDropdown: makeTagsTopBarDropdown,
       makeDeleteTagConfirm: makeDeleteTagConfirm,
       detectHostCapabilities: detectHostCapabilities,

@@ -131,8 +131,8 @@ that card. The target must be a task in this workspace.
   this row -- removing a tag stays confined to the card chip row or the Add
   tag modal.
 - **Add/pick a tag**: open a card's context/dropdown menu, choose **Add
-  tag...** (a tag icon, flat top-level item between "Move to" and "Link").
-  A medium modal shows a "Select or create a tag..." input (typing a name
+  tag...** (a tag icon, top-level item between "Move to" and "Link"). A
+  medium modal shows a "Select or create a tag..." input (typing a name
   that doesn't exist yet enables **Add**, which creates it in your tag
   catalog and applies it to the card) above a scrollable list of your
   existing colored tags rendered as pills -- click a row to apply/remove it
@@ -140,6 +140,31 @@ that card. The target must be a task in this workspace.
   color its name derives -- or the neutral gray, if the auto-color setting is
   off (see **Tag colors** below) -- and either way you can recolor it from its
   swatch in the Tags box.
+- **Quick pick**: on a host that renders plugin submenus, **Add tag...** is
+  a submenu instead: **More tags...** first (the same modal), then a native
+  separator and up to five tags used most recently anywhere in the workspace,
+  most recent first; each tag has a dot matching its color. The separator
+  requires the host's `separatorBefore` submenu-child support; older hosts keep
+  the same actions without the divider.
+  Choosing one applies it to this card in a single click and refreshes the
+  chips, so the tag you reach for constantly is one click from the card menu
+  and from the sidebar/`/tasks` row menu, wherever that item appears. Tags
+  the card already carries are left out -- the list only ever adds what you
+  picked, and removing a tag stays on the card's chips and in the modal.
+  Recency is workspace-wide (an agent's application counts too) and comes
+  from the application timestamps the shared read already returns; the plugin
+  stores no extra history, and the menu build itself never fetches -- it reads
+  the catalog the chips, the filter and the periodic refresh keep warm. When
+  there is nothing recent to offer -- a workspace nothing has been applied in
+  yet, a catalog that has not loaded, or a card already carrying every recent
+  tag -- **Add tag...** stays a plain item that opens the modal, instead of
+  nesting the same modal one level deeper behind an extra click. On a host
+  predating plugin submenus the item stays flat and opens the modal, exactly
+  as before, and the manifest states that boundary: `min_kandev_version:
+  "0.96.0"` is the first release carrying the API, so a release host older
+  than that declines to install the package instead of shipping a menu that
+  cannot render the list (a dev/nightly host has no release boundary, skips
+  the check, and keeps the flat item).
 - **Filter and manage from one place**: an icon-lg filter-icon button in
   the app's top bar opens the Tags box, a 380px-wide dropdown listing your
   whole tag catalog as grid-aligned rows (color swatch, name pill, delete
@@ -174,10 +199,13 @@ that card. The target must be a task in this workspace.
 - **Remove a tag from a card**: click the `x` on a chip on the card itself,
   or click it off in the Add tag modal.
 - Tag names are trimmed, capped at 22 characters, deduplicated
-  case-insensitively within your catalog; each card is capped at 12 applied
-  tags. Deleting a tag leaves any card that still carried it (a rare race
-  with the cascade removal above) showing no chip for it at all, rather
-  than a chip labeled with the raw id.
+  case-insensitively within your catalog. The 12-applied-tags cap covers the
+  plugin's own private per-card list (the pre-0.8 layer, and what an older
+  host stores): the shared catalog layer has no per-card cap, so on a shared
+  host neither the Add tag modal nor the quick pick refuses a 13th tag.
+  Deleting a tag leaves any card that still carried it (a rare race with the
+  cascade removal above) showing no chip for it at all, rather than a chip
+  labeled with the raw id.
 
 ### Tag colors
 
@@ -324,6 +352,137 @@ some-parent-dir/
 ├── kandev-plugin-tags/   (this repo)
 └── kandev/
     └── apps/backend/     (from kdlbs/kandev)
+```
+
+### Host support: the menu submenu (merged upstream)
+
+The card menu's quick pick needs a host that renders plugin submenus
+(`TaskMenuActionRegistration.items`, see `docs/plans/plugins/PLUGIN-API.md`
+in the monorepo). That host API is **merged in kandev main**: kdlbs/kandev PR
+[#3874](https://github.com/kdlbs/kandev/pull/3874) ("feat(plugins): render a
+task menu action as a submenu") landed on 2026-09-23 as merge commit
+`f8708da1e0c6261d98229ca2cf1901eee9bfdf2a`, so a host built from that commit
+or a later release renders the quick pick.
+
+A host older than that keeps the flat behaviour, by design: **Add tag...**
+stays the item it has always been and opens the picker modal.
+
+The package states the boundary in its manifest: `min_kandev_version:
+"0.96.0"` is the first *release* containing the API -- the merge commit is an
+ancestor of `v0.96.0` and not of `v0.95.1`. Kandev enforces that on install for
+release builds only (`requires kandev >= 0.96.0, running v0.95.1`); a `dev` or
+nightly build carries no release boundary and skips the check, which is where
+the flat fallback above is still reachable -- a host that has the API always
+renders the list, so the fallback is a safety net, not the supported path.
+
+`contrib/kandev-plugin-submenus.patch` is the reference implementation those
+twenty-three commits were reviewed into, kept for the reasoning behind each
+step rather than as a prerequisite. One piece of it is not in the merged
+version: `isPluginIconComponent` there accepts a component by its `$$typeof`
+tag alone, so an object forged to carry `react.memo`/`react.forward_ref` -- or
+a `forward_ref` whose `render` is a class -- reaches `createElement` and
+throws during a render, where the patch validates the payload and refuses
+classes. That only concerns a *malformed* registration; this plugin's are
+well-formed, so it is unaffected either way.
+
+<details>
+<summary>Reference patch commits</summary>
+
+1. `feat(plugins): render a task menu action as a submenu` -- the
+   `TaskMenuActionRegistration.items` contract, its menu-entry builder, the
+   API doc, and its tests.
+2. `fix(plugins): keep element-form plugin menu icons` -- menu entries
+   render a ready-made element icon as-is instead of replacing it with the
+   fallback puzzle glyph, which is the shape this plugin's tag icon uses.
+3. `fix(plugins): keep a plugin submenu reachable in command lists` -- the
+   command palette and the sidebar's task commands flatten a submenu's item
+   children instead of dropping the action.
+4. `fix(plugins): validate submenu children at the host boundary` -- a
+   malformed or async `items()` result degrades to the flat item instead of
+   breaking the card render.
+5. `docs(plugins): document submenu items in the authoring guide` -- the
+   authoring guide and `apps/web/AGENTS.md` stop calling group `primary`
+   flat-only.
+6. `docs(plugins): align the task menu icon type with the SDK` -- the two
+   task-menu interface blocks name `PluginIcon`, like every other icon field
+   in the document.
+7. `test(plugins): pin the submenu registration in the SDK contract` -- the
+   public/host SDK contract test covers the two registrations this adds,
+   including that a flat-only registration still compiles.
+8. `perf(plugins): build a card's plugin menu entries once per render` -- the
+   card builds its dropdown and context variants from one render, so each
+   plugin action's `items()` is evaluated once instead of twice.
+9. `fix(plugins): keep a submenu trigger label in the command palette` -- the
+   sidebar command builder stamped its own context over the trigger label a
+   flattened child carries, so the label never reached a palette row.
+10. `fix(plugins): keep flattened palette command ids unique` -- a child's id
+    could spell a different action's key, which collides in the palette where
+    the id is also the search value.
+11. `fix(plugins): guard the registration's own label and icon` -- an action
+    whose label was not a usable string is omitted instead of handing React an
+    object, a non-string icon is no longer coerced into a name lookup on any
+    surface, and the new tests typecheck again.
+12. `fix(plugins): keep an explicit null icon, and finish the child-filter
+    docs` -- `icon: null` counts as "no icon" rather than dropping the child,
+    and both docs state the whole child filter and the shared per-render
+    evaluation.
+13. `fix(plugins): recognise component-object icons and escape child keys` --
+    a `forwardRef`/`memo`/`lazy` component icon (what every `@tabler` icon is)
+    no longer drops its child, and a child's key delimits and escapes its id
+    so two actions cannot produce one key.
+14. `fix(plugins): make child keys unforgeable and keep the native Edit item`
+    -- every key part escapes the delimiter, so even an action id carrying it
+    cannot spell another action's child key, and a group `edit` registration
+    the host cannot render no longer wraps the native `Edit` item in an empty
+    submenu.
+15. `fix(plugins): drop lazy icons, encode key parts, and resolve own keys
+    only` -- a `lazy` icon would suspend a menu instead of falling back, both
+    key id parts are percent-encoded so two plugins cannot spell one key, and
+    the curated icon map is only read for its own keys (`__proto__`,
+    `constructor` and friends no longer reach React).
+16. `fix(plugins): force the flat Edit item over a prebuilt bundle` --
+    `forceFlatEdit` outranks a prebuilt contribution bundle instead of being
+    silently undone by it, and the API doc's fallback list no longer claims a
+    partly broken array falls back whole.
+17. `fix(plugins): encode key parts without throwing on a lone surrogate` --
+    `encodeURIComponent` raises `URIError` on an unpaired surrogate, which a
+    truncated emoji in a plugin id produces and which would take the whole
+    kanban route down from inside a render; a non-throwing per-code-unit
+    encoder replaces it, and `disabled: null` now counts as absent.
+18. `docs(plugins): state the action-id uniqueness requirement` -- the SDK
+    type and the API doc say an action id must be unique within its plugin and
+    group (and why the registry does not enforce it), and the palette comment
+    describing the old dash-joined key scheme is corrected.
+19. `fix(plugins): make the key escape injective` -- the previous encoder
+    collided (`U+25E9` with `%E9`; plugin `p` + action `E9é` with plugin `pé`
+    + action `E9`); escaping only the key's own three special characters makes
+    it injective and delimiter-free by construction while staying
+    non-throwing on lone surrogates.
+20. `test(plugins): pin the escaping's width independence` -- the regression
+    pairs a per-code-unit hex escape collides on (`%0` vs U+0250, `%` vs
+    `%25`, U+00E9+"a" vs U+0E9A) are asserted distinct, and the key tests live
+    in their own file.
+21. `fix(plugins): resolve a child's icon inside the guard, and finish the
+    null docs` -- the snapshot holds the resolved icon node, so a `$$typeof`
+    getter that answers once and throws cannot escape the guard, and the SDK
+    type, PLUGIN-API.md and the authoring guide all say `null`/absent
+    `disabled` means enabled.
+22. `fix(plugins): stop the diagnostics and the icon guard from throwing` --
+    an action id that is a Symbol (or whose `toString` throws) is reported
+    instead of throwing out of the report, and a component icon must carry the
+    payload React can call, so a plain object faking `$$typeof` falls back to
+    the glyph instead of reaching `createElement`.
+23. `fix(plugins): make the icon guard total and the registry read defensive`
+    -- a class payload is refused (React cannot call a constructor as a
+    function component), the guard answers "no icon" for a throwing getter or
+    a cyclic wrapper instead of throwing through surfaces with no error
+    boundary, and `getTaskMenuActions` drops a registration it cannot read
+    instead of letting its getter escape during a card's render.
+</details>
+
+```sh
+# only to pick up the payload validation above on a host built before the merge
+git -C ../kandev am /path/to/kandev-plugin-tags/contrib/kandev-plugin-submenus.patch
 ```
 
 ### Setup / Prerequisites
