@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Apply create-dialog tag drafts only to the task reported by that dialog's
+  success callback. Closing clears the draft immediately, and late tag-creation
+  responses cannot select tags in a later dialog.
+
 ## [0.16.0] - 2026-09-28
 
 ### Changed

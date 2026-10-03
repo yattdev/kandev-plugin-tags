@@ -171,6 +171,33 @@ that card. The target must be a task in this workspace.
   Untagged section; multi-tag tasks appear in each matching section. This is
   deliberately page-local: it operates on the task rows already loaded by
   `/tasks`, not across backend pages.
+- **Tag a task while creating it**: on a host that mounts the
+  `task-create-input-actions` slot and supports plugin actions, the Create
+  Task dialog's composer toolbar shows the selected colored tag pills
+  immediately to the left of the **Tags** button (which also shows a count
+  badge). Its popover lets you toggle existing workspace tags or create a new
+  one; selected tags are applied when the host announces the task
+  (`task.created`). The host gives the plugin no link between a dialog and the
+  task it produces, so this is a best-effort correlation with known limits:
+  - The selection goes to the next top-level task created in the same
+    workspace whose origin is `manual` (or absent). Agent-created, routine, onboarding and
+    automation tasks and any subtask (`parent_id`) are skipped, but a top-level
+    task an agent creates over MCP, one the GitHub PR watcher imports, or an
+    Office task a person creates is also stamped `manual` by the host and can take the selection first.
+  - The host mounts the same slot, with identical props, in the **Edit task**
+    dialog. A tag picked there is not applied to the edited task (an update emits
+    no `task.created`) and may be claimed by the next manual task instead.
+    Fixing both needs a mode / created-task signal from the host.
+  - The selector is bound to the active workspace. A dialog that creates its
+    task in another workspace (the host's Improve Kandev dialog) cannot be
+    served: when it closes, a toast says the tags were not applied and the
+    selection is dropped. The event is not scoped to your dialog, so a manual
+    task created in another workspace while the dialog was open (another tab, an
+    agent, the PR watcher) triggers the same toast even if you cancelled.
+  - An unclaimed selection is dropped 10 seconds after the dialog closes. A tag
+    created in the popover just as the dialog closes is not selected.
+  - A tag deleted in the meantime is skipped. Any other failure to add a tag is
+    reported in a toast and the remaining tags are still applied. The new-session composer does not get this button.
 - **Remove a tag from a card**: click the `x` on a chip on the card itself,
   or click it off in the Add tag modal.
 - Tag names are trimmed, capped at 22 characters, deduplicated
