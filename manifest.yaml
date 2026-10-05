@@ -3,7 +3,14 @@
 # the kandev monorepo for the full schema.
 id: "kandev-plugin-tags"
 api_version: 1
-version: "0.16.0"
+version: "0.17.0"
+# The card menu's plugin submenus (TaskMenuActionRegistration.items) landed in
+# kandev v0.96.0 (kdlbs/kandev#3874, merge f8708da1e0c6261d98229ca2cf1901eee9bfdf2a),
+# and the quick pick renders through them. A release build older than that
+# refuses the install ("requires kandev >= 0.96.0, running ..."); a dev or
+# nightly build has no release boundary and skips the check, and there the item
+# falls back to the flat menu entry described in the README.
+min_kandev_version: "0.96.0"
 display_name: "Tags"
 description: "Create and apply workspace-shared colored tags from the board or an agent. Humans manage every shared tag; agents manage only agent-created tags, which display a bot marker when applied. A tag created without a color gets one derived from its name, which the plugin's settings can turn off. On compatible hosts, the Tags box uses a single-select board filter (All, one tag, or Untagged) and contributes page-local Tag Sort/Group options to /tasks; older hosts retain management and the existing filter fallback."
 author: "yattdev"
