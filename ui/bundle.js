@@ -3443,10 +3443,10 @@
   // ---------------------------------------------------------------------
 
   /**
-   * Projects this user's private tags into the host's optional, page-local
-   * task-list facet API. The host owns registration generation/lifecycle;
-   * this plugin owns only its storage subscriptions and releases those in
-   * destroy() through addDisposable. Older hosts simply do not have this
+   * Projects workspace tags into the host's optional task-list facet API,
+   * shared by /tasks and compatible saved-sidebar views. The host owns
+   * registration generation/lifecycle; this plugin releases its subscriptions
+   * in destroy() through addDisposable. Older hosts do not have this
    * registry method, so their existing card chips and board filtering keep
    * working unchanged.
    */
@@ -3490,7 +3490,7 @@
      * group header and a newly applied tag would never leave Untagged
      * until a full reload. Every one of those actions calls
      * refreshSharedTags(), and ensureSharedTagRefresh adds a 30s/on-focus
-     * poll, so adopting that store is what makes /tasks react live.
+     * poll, so adopting that store keeps all facet consumers live.
      */
     function refreshCatalog() {
       if (!currentWorkspaceId) {
@@ -3626,33 +3626,47 @@
       );
     }
 
+    function getTagValues(context) {
+      // Never project the previous workspace's catalog into another workspace.
+      if (context.workspaceId && context.workspaceId !== currentWorkspaceId) return [];
+      var tagIds = sharedTaskTags ? sharedTaskTags[context.taskId] : getTaskTagCacheEntry(context.taskId);
+      if (!tagIds) return [];
+      return tagIds.map(function (tagId) {
+        var tag = resolveTag(catalog, tagId);
+        return tag ? { value: tag.id, label: tag.name, color: renderableColor(tag.color) } : null;
+      }).filter(function (tag) { return tag !== null; });
+    }
+
+    function subscribe(listener) {
+      listeners.push(listener);
+      return function () {
+        listeners = listeners.filter(function (candidate) { return candidate !== listener; });
+      };
+    }
+
     registry.registerTaskListFacet({
       id: TAGS_FILTER_ID,
       label: "Tag",
+      getValues: getTagValues,
+      subscribe: subscribe,
+    });
+    registry.registerTaskListFacet({
+      id: "tag-combinations",
+      label: "Tag combination",
       getValues: function (context) {
-        // Never use a prior workspace's catalog when the host provides a
-        // task workspace context. A missing workspace keeps compatibility
-        // with early host drafts and relies on the active-workspace reset.
-        if (context.workspaceId && context.workspaceId !== currentWorkspaceId) return [];
-        var tagIds = sharedTaskTags ? sharedTaskTags[context.taskId] : getTaskTagCacheEntry(context.taskId);
-        if (!tagIds) return [];
-        return tagIds
-          .map(function (tagId) {
-            var tag = resolveTag(catalog, tagId);
-            return tag ? { value: tag.id, label: tag.name, color: renderableColor(tag.color) } : null;
-          })
-          .filter(function (tag) {
-            return tag !== null;
-          });
+        var tags = getTagValues(context);
+        if (!tags.length) return [];
+        // Identity depends on the set of tag IDs, never assignment order or names.
+        var identity = JSON.stringify(tags.map(function (tag) { return tag.value; }).sort());
+        tags.sort(function (a, b) {
+          return a.label.localeCompare(b.label, undefined, { sensitivity: "base" }) ||
+            a.value.localeCompare(b.value);
+        });
+        var value = { value: identity, label: tags.map(function (tag) { return tag.label; }).join(" + ") };
+        if (tags.length === 1) value.color = tags[0].color;
+        return [value];
       },
-      subscribe: function (listener) {
-        listeners.push(listener);
-        return function () {
-          listeners = listeners.filter(function (candidate) {
-            return candidate !== listener;
-          });
-        };
-      },
+      subscribe: subscribe,
     });
   }
 

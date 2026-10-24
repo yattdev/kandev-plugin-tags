@@ -188,12 +188,41 @@ that card. The target must be a task in this workspace.
   its own "Tags" section/Untagged option instead, so filtering is never
   lost, only relocated depending on what the host supports -- creating,
   recoloring, renaming, and deleting stay available here regardless of tier.
+- **Saved left-sidebar views — Group by Tag**: requires a host with plugin
+  task-list facet grouping in saved sidebar views; exposing
+  `registerTaskListFacet` for `/tasks` alone is not sufficient. In the
+  sidebar view settings, choose **Tag** in **Group**, then save the view.
+  The host persists the choice with that workspace's view (including its
+  draft before saving). Grouping uses only tasks on the currently loaded
+  sidebar page in the current workspace, not all workspace tasks, tasks
+  on other backend pages, or tasks from other workspaces. A task with
+  multiple tags appears in each matching colored section; untagged
+  tasks appear in **Unassigned**. Only sections containing tasks are shown,
+  so unused catalog tags and an empty Unassigned section are omitted.
+  Tag applications, removals, renames, and color changes update through the
+  same live facet subscription as `/tasks`. If Tags is disabled or its facet
+  is unavailable, the host falls back to its normal grouping without
+  erasing the saved Tag selection; it resumes when the facet returns.
+  This sidebar integration needs the corresponding Kandev host change;
+  installing this plugin alone does not add it to older hosts. No new
+  plugin API or tag storage is needed.
+- **Group by Tag combination**: choose **Tag combination** instead of **Tag**
+  to create one section for each exact set of tags. A task carrying **Bug**
+  and **UX** appears only in **Bug + UX**, not in the separate **Bug** or
+  **UX** sections. Tasks carrying the same set share a section regardless of
+  assignment order; single-tag tasks have their own sections, and untagged
+  tasks remain in **Unassigned**. Section identities use tag IDs, so renaming
+  tags updates the heading without changing the group's identity. Single-tag
+  sections retain their tag color; combinations do not choose an arbitrary
+  member's color. This option uses the same workspace/page scope and live
+  updates as **Tag** and is also offered by compatible `/tasks` controls.
 - **Task list Sort and Group**: on hosts that expose
   `registerTaskListFacet`, this plugin contributes **Tag** to `/tasks` Sort
   and Group. Sorting uses the alphabetically first resolved tag name
   (case-insensitive), keeps untagged tasks last, and preserves the incoming
-  order for ties. Grouping creates a colored section for every tag and an
-  Untagged section; multi-tag tasks appear in each matching section. This is
+  order for ties. Grouping creates a colored section for every tag that at
+  least one loaded task carries, plus the host's "Unassigned" section for
+  untagged tasks; multi-tag tasks appear in each matching section. This is
   deliberately page-local: it operates on the task rows already loaded by
   `/tasks`, not across backend pages.
 - **Remove a tag from a card**: click the `x` on a chip on the card itself,
