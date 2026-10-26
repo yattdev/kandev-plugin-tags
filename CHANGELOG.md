@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [Unreleased]
 
 ### Changed
 
@@ -8,6 +8,11 @@
   `separatorBefore` support render a divider after **More tags...**.
 - Show each recent tag's color in the submenu with a matching dot.
 
+### Fixed
+
+- Apply create-dialog tag drafts only to the task reported by that dialog's
+  success callback. Closing clears the draft immediately, and late tag-creation
+  responses cannot select tags in a later dialog.
 
 ## [0.16.0] - 2026-09-28
 
