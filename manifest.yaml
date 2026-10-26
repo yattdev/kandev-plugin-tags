@@ -3,7 +3,7 @@
 # the kandev monorepo for the full schema.
 id: "kandev-plugin-tags"
 api_version: 1
-version: "0.17.0"
+version: "0.18.0"
 # The card menu's plugin submenus (TaskMenuActionRegistration.items) landed in
 # kandev v0.96.0 (kdlbs/kandev#3874, merge f8708da1e0c6261d98229ca2cf1901eee9bfdf2a),
 # and the quick pick renders through them. A release build older than that

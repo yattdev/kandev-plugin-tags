@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.18.0] - 2026-10-26
+
+### Changed
+
+- docs: clarify task-create tag application (fd17684)
+- fix: scope create-task tag drafts to dialog (fd5668b)
+- fix: expire task-create tag drafts correctly (260d3ee)
+- feat: show selected tags in task creation (9650094)
+- feat(tags): show tag colors in recent submenu (4a553a0)
+- chore(release): set plugin version to 0.17.0 (373db3b)
+- chore(release): set plugin version to 0.18.0 (1107ccf)
+- feat: separate recent tag menu group (a06ed46)
+- feat: require kandev 0.96.0, the first release with the submenu API (ff449a4)
+- docs: the submenu host API is merged in kandev main (1cbe8a5)
+- docs: fold the total-icon-guard and registry fixes into the patch (69caa2c)
+- docs: fold the diagnostics and icon-tag fixes into the patch (50e661b)
+- docs: fold the icon-guard and null-doc fixes into the patch (32b4102)
+- docs: fold the width-independence tests into the patch (9ea1a56)
+- docs: fold the injective-key fix into the patch (87dfcba)
+- docs: refresh the patch after the matcher fix (803945e)
+- docs: fold the id-uniqueness note into the patch (1504cf8)
+- docs: fold the surrogate-safe encoder into the patch (1b1d7c3)
+- docs: fold the flat-Edit precedence fix into the patch (e961833)
+- docs: fold the lazy/keys/own-key fixes into the patch (e479e17)
+- docs: fold the unforgeable-key and edit-item fixes into the patch (dc609bf)
+- docs: fold the component-icon and child-key fixes into the patch (3f28c3f)
+- docs: fold the null-icon and doc-filter fixes into the patch (0473b49)
+- docs: fold the host round-3 fixes into the patch (76339e2)
+- refactor(ui): build the quick list's head entry only when it has a list (05eed3a)
+- docs: mirror the PR's palette fixes into the host patch (7f76d61)
+- fix(ui): build the quick list's callbacks outside the scanning scope (a492ea6)
+- docs: extend the host patch to eight commits (ae4d84b)
+- docs: adopt the PR's SDK-contract and icon-type commits (5c5a5dc)
+- fix(ui): cache the empty quick list and prune on every payload swap (d496699)
+- docs: sync the host patch and its README section (197bfbe)
+- fix(ui): collapse the quick list instead of nesting a one-child submenu (6fa4ce7)
+- test(ui): pin per-card quick-list isolation (d2a4574)
+- chore: refresh the host patch with the review fixes (c3c70d3)
+- fix(ui): harden the tag quick pick after adversarial review (890ee01)
+- feat(ui): add a recent-tag quick pick to the Add tag menu (fcf48c7)
+
+
 ## [Unreleased]
 
 ### Changed
